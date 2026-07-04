@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>大会逆算型 年間育成管理システム</title>
+  
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <style>
+    body { font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif; }
+    .tab-active { border-bottom: 3px solid #10b981; color: #10b981; font-weight: bold; background-color: #f0fdf4; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; }
+    ::-webkit-scrollbar-thumb { background: #10b981; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen text-gray-800">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // ============================================================================
+    // 1. マスターデータ（エクセルから完全に復元・西ノ京中学校用デフォルトデータ）
+    // ============================================================================
+    const GROUPS = [
+      { id: 'A', name: 'グループA (4月 春季総体)' }, { id: 'B', name: 'グループB (5月 国スポ選考会)' },
+      { id: 'C', name: 'グループC (6月 個人予選・京都C)' }, { id: 'D', name: 'グループD (7月 市・府大会)' },
+      { id: 'E', name: 'グループE (8月 近畿・全国等)' }, { id: 'F', name: 'グループF (9-10月 秋季新人)' },
+      { id: 'G', name: 'グループG (11月 府新人等)' }, { id: 'H', name: 'グループH (12月 インドア等)' },
+      { id: 'I', name: 'グループI (1月 冬季強化)' }, { id: 'J', name: 'グループJ (3月 集大成)' },
+      { id: '共通', name: 'グループ共通 (随時)' }
+    ];
+
+    const initialTournaments = [
+      { id: 'A', month: '4月', date: '4/25', name: '京都市中学校春季総合体育大会', category: '団体・個人', target: '新チーム始動・基本の定着を評価' },
+      { id: 'B', month: '5月', date: '5/24', name: '国民スポーツ大会U-14選考会', category: '個人', target: 'トップ選手の個人選抜評価' },
+      { id: 'C', month: '6月', date: '日程確定後記入', name: '個人ブロック予選', category: '個人', target: '夏本戦へ向けた個人実戦評価' },
+      { id: 'C', month: '6月', date: '日程確定後記入', name: '京都カップ中学校', category: '個人・団体', target: '実戦強化・経験値の評価' },
+      { id: 'D', month: '7月', date: '日程確定後記入', name: '京都市大会（団体・個人）', category: '団体・個人', target: '夏季シーズン第一関門' },
+      { id: 'D', month: '7月', date: '日程確定後記入', name: '京都府大会（団体・個人）', category: '団体・個人', target: '近畿・全国につながる最重要関門' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '近畿大会', category: '団体・個人', target: '全国につながるトップ選手評価' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '全国中学校大会', category: '団体・個人', target: '1年間の頂点の評価' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '京都府中学生研修大会', category: '団体・個人', target: '選外選手の再評価・次年度育成' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '京都府選手権（ランキング対象）', category: '個人', target: '個人の年間ランキング評価' },
+      { id: 'F', month: '9〜10月', date: '日程確定後記入', name: '京都市中学校秋季新人大会（団体・個人）', category: '団体・個人', target: '新チーム発足の初評価' },
+      { id: 'G', month: '11月', date: '日程確定後記入', name: '京都府中学校秋季新人大会', category: '団体・個人', target: '新チームの実戦評価' },
+      { id: 'G', month: '11月', date: '日程確定後記入', name: 'KSTグロースカップ', category: '個人', target: '育成カップ・実戦経験の場' },
+      { id: 'G', month: '11月', date: '11/28', name: '京都府スポーツ協会主催大会（太陽が丘）', category: '団体・個人', target: '新チームの育成評価機会' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '京都府ソフトテニスフェスティバル', category: '団体・個人', target: '交流・裾野拡大' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '都道府県対抗選考会', category: '個人', target: '代表選手選出評価' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '京都府1年生大会', category: '個人', target: '1年生の育成評価' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '近畿インドア大会', category: '団体・個人', target: '冬季の実戦評価' },
+      { id: 'I', month: '1月', date: '日程確定後記入', name: 'KSTグロースカップ', category: '個人', target: '冬季強化の中間評価' },
+      { id: 'I', month: '1月', date: '1/10', name: 'KST主催大会（太陽が丘）', category: '団体・個人', target: '育成評価機会' },
+      { id: 'I', month: '1月', date: '日程確定後記入', name: 'ALL DAY MATCH', category: '団体・個人', target: '長時間実戦の評価' },
+      { id: 'J', month: '3月', date: '日程確定後記入', name: '都道府県対抗 全日本中学生大会', category: '団体', target: '年度の集大成・代表戦' },
+      { id: 'J', month: '3月', date: '日程確定後記入', name: 'KSTグロースカップ', category: '個人', target: '1年間の成長確認' },
+      { id: 'J', month: '3月', date: '3/20', name: 'KST主催大会（太陽が丘）', category: '団体・個人', target: '送り出しの評価機会' },
+      { id: '共通', month: '不定期', date: '随時', name: 'KSC主催練習試合（亀岡）', category: '団体・個人', target: '直近の課題に応じた実戦調整' }
+    ];
+
+    const initialPlans = {
+      'A': { position: '新チームが今どこまで基本を積み上げているかを測るスタートライン確認大会。', back: 'サーブ・レシーブの安定した基本フォーム、ボレー・ストロークの基礎精度', front: 'シンプルな前後陣の役割分担、ラリーを続ける展開力', team: '初めての大会の緊張との向き合い方、試合中の切り替え、挨拶・時間厳守', level: '基礎技術（サーブ・レシーブ）のミス傾向の把握' },
+      'B': { position: '府内トップ層選手の「個人選抜」大会。', back: '高い精度のストローク・ボレー、決定力のあるスマッシュ', front: '対戦相手のレベルに応じた戦術変更力', team: 'プレッシャー下での集中力の維持、選ばれる選手としての自覚', level: '選考結果の技術的要因分析、選外選手への個別フィードバック' },
+      'C': { position: '夏の本戦（市・府大会）に向けた「個人実戦強化」の場。', back: '実戦で崩れないサーブ・レシーブの再現性', front: '相手の苦手を突く組み立て、ペアとしての意思統一', team: '格上・格下いずれにも動揺しない安定感、対戦相手への礼儀', level: '予選特有の「勝ちに行く場面」の見極め' },
+      'D': { position: '夏季シーズン最大の関門。近畿・全国大会につながる公式戦。', back: 'プレッシャー下でも崩れない基本技術の再現性', front: 'チームとしての勝ちパターンの確立、相手分析に基づく戦術選択', team: '大舞台でのメンタルコントロール、応援でチームを支える姿勢', level: 'タイブレーク等、大事な場面での冷静な判断' },
+      'E': { position: '年間の頂点にあたる評価月。トップ選手の「集大成」と選外の「再評価」。', back: '全国レベルに対応する高精度・高再現性の技術', front: '格上との対戦を想定した戦術の幅', team: '大舞台での自信、府代表としての振る舞い', level: '全国レベルとの差の具体的分析、個人ごとの伸びしろ整理' },
+      'F': { position: '3年生引退後、新チーム（2年生以下中心）の発足評価日。', back: '新チーム主力の基礎技術の総点検、サーブ・レシーブの安定化', front: '新しいペア・新しい役割での連携構築', team: '「自分たちが主役」という自覚、新チームのリーダーシップの芽', level: '経験不足を基本に忠実な判断で補う' },
+      'G': { position: '新チームの実戦経験を積む育成カップ月間。', back: '新人大会で見えた課題の実戦での修正', front: '複数大会を通じた戦術パターンの引き出し増加', team: '連続して試合をこなす中での集中力の持続', level: '場数を踏むことによる判断スピードの向上' },
+      'H': { position: '目的が異なる4大会（交流・選考・1年生評価・冬季実戦）が集中する月。', back: '1年生は基礎技術の定着度確認、上級生は課題明確化', front: 'インドア独特のコート感覚への対応', team: '1年生大会での先輩からの学び、他校との交流マナー', level: '1年生の技術定着度と今後の指導優先順位' },
+      'I': { position: '冬季強化期間の成果を確認する中間実戦評価。', back: '冬季に取り組んだフォーム改善の実戦での再現', front: '長時間試合を通じた戦術の持続力', team: '長時間の試合でも崩れないメンタル、運営を通じた責任感', level: 'フォーム改善の定着度チェック、体力面での課題確認' },
+      'J': { position: '年度の集大成大会。1年間の成長を確認し新年度へ引き継ぐ。', back: '1年間で身につけた技術の完成度確認', front: 'チーム・個人としての戦術の総仕上げ', team: '3年生は最後の締めくくり、下級生は次年度主力としての自覚', level: '1年間を通じた成長の総括、次年度に引き継ぐ課題の明文化' },
+      '共通': { position: '直近の大会や課題に応じて柔軟に組み込む実戦の調整弁。', back: '直近の大会で出た技術課題を試す', front: '直近の大会で出た戦術課題を試す', team: '対戦相手との交流を通じた礼儀・関係づくり', level: 'その時点の重点課題の改善度チェック' }
+    };
+
+    const initialPractices = {};
+    GROUPS.forEach(g => {
+      initialPractices[g.id] = [
+        { id: Date.now() + 1, week: '第1週', theme: '基本動作の徹底', drill: '手投げ一本打ち、サーブ・レシーブの基礎確認' },
+        { id: Date.now() + 2, week: '第2週', theme: '前衛・後衛の基礎連携', drill: 'サーブレシーブからの3球目処理、前衛の基本ポジション確認' },
+        { id: Date.now() + 3, week: '第3週', theme: '実戦形式・ラリー継続', drill: '半面でのクロスラリー（ミスするまで）、前衛をつけた形式練習' },
+        { id: Date.now() + 4, week: '第4週', theme: '大会直前調整・戦術遂行', drill: '本番を想定したゲーム練習、ベンチワークと声出しの徹底' }
+      ];
+    });
+
+    const initialReflections = {};
+    GROUPS.forEach(g => { initialReflections[g.id] = { completed: false, good: '', bad: '', nextAction: '' }; });
+
+    // --- 新規チーム作成時の空データ生成関数 ---
+    const generateEmptyData = () => {
+      const plans = {}; const practices = {}; const reflections = {};
+      GROUPS.forEach(g => {
+        plans[g.id] = { position: '', back: '', front: '', team: '', level: '' };
+        practices[g.id] = [{ id: Date.now() + Math.random(), week: '第1週', theme: '', drill: '' }];
+        reflections[g.id] = { completed: false, good: '', bad: '', nextAction: '' };
+      });
+      return { tournaments: [], plans, practices, reflections };
+    };
+
+    // キャッシュを確実に上書きするための新しいキー
+    const CACHE_KEY = 'kst_system_cache_v3';
+
+    // 初期状態（西ノ京中学校にフルデータを投入）
+    const initialGlobalStore = {
+      "西ノ京中学校": {
+        "2026": {
+          tournaments: initialTournaments,
+          plans: initialPlans,
+          practices: initialPractices,
+          reflections: initialReflections
+        }
+      },
+      "KSTクラブ": { "2026": generateEmptyData() }
+    };
+
+    const App = () => {
+      // ================= ステート管理（キャッシュ対応） =================
+      const [globalStore, setGlobalStore] = useState(() => {
+        const cached = localStorage.getItem(CACHE_KEY);
+        return cached ? JSON.parse(cached) : initialGlobalStore;
+      });
+
+      const [currentTeam, setCurrentTeam] = useState(() => localStorage.getItem('kst_v3_team') || "西ノ京中学校");
+      const [currentYear, setCurrentYear] = useState(() => localStorage.getItem('kst_v3_year') || "2026");
+      const [activeTab, setActiveTab] = useState('calendar');
+      const [selectedGroup, setSelectedGroup] = useState('A');
+      
+      const [history, setHistory] = useState([]);
+      const [showSaveMessage, setShowSaveMessage] = useState(false);
+
+      // キャッシュの自動保存
+      useEffect(() => {
+        localStorage.setItem(CACHE_KEY, JSON.stringify(globalStore));
+        localStorage.setItem('kst_v3_team', currentTeam);
+        localStorage.setItem('kst_v3_year', currentYear);
+        setShowSaveMessage(true);
+        const timer = setTimeout(() => setShowSaveMessage(false), 1500);
+        return () => clearTimeout(timer);
+      }, [globalStore, currentTeam, currentYear]);
+
+      const currentTeamData = globalStore[currentTeam] || { "2026": generateEmptyData() };
+      const availableYears = Object.keys(currentTeamData).sort();
+      const actualYear = availableYears.includes(currentYear) ? currentYear : availableYears[0];
+      const currentData = currentTeamData[actualYear] || generateEmptyData();
+
+      // ================= 更新コア関数 =================
+      const updateStore = (updater) => {
+        setHistory(prev => [...prev.slice(-9), globalStore]);
+        setGlobalStore(prev => {
+          const newData = updater(prev[currentTeam][actualYear]);
+          return { ...prev, [currentTeam]: { ...prev[currentTeam], [actualYear]: newData } };
+        });
+      };
+
+      // ================= 操作系アクション =================
+      const handleUndo = () => {
+        if (history.length === 0) return;
+        setGlobalStore(history[history.length - 1]);
+        setHistory(prev => prev.slice(0, -1));
+      };
+
+      const handleAddTeam = () => {
+        const teamName = prompt('新しいチーム名・組織名（例: 地域クラブA）を入力してください:');
+        if (teamName && !globalStore[teamName]) {
+          setHistory(prev => [...prev, globalStore]);
+          setGlobalStore(prev => ({ ...prev, [teamName]: { "2026": generateEmptyData() } }));
+          setCurrentTeam(teamName);
+          setCurrentYear("2026");
+        } else if (globalStore[teamName]) {
+          alert('そのチーム名は既に存在します。');
+        }
+      };
+
+      const handleAddYear = () => {
+        const nextYear = String(Number(actualYear) + 1);
+        if (window.confirm(`${nextYear}年度を作成し、${currentTeam}の育成ノウハウを引き継ぎますか？\n(大会日程や振り返り内容はリセットされます)`)) {
+          setHistory(prev => [...prev, globalStore]);
+          const baseData = currentTeamData[actualYear];
+          const newData = {
+            ...baseData,
+            tournaments: baseData.tournaments.map(t => ({ ...t, date: '未定' })),
+            reflections: Object.keys(baseData.reflections).reduce((acc, key) => {
+              acc[key] = { completed: false, good: '', bad: '', nextAction: '' };
+              return acc;
+            }, {})
+          };
+          setGlobalStore(prev => ({ ...prev, [currentTeam]: { ...prev[currentTeam], [nextYear]: newData } }));
+          setCurrentYear(nextYear);
+        }
+      };
+
+      // --- 大会管理 ---
+      const handleAddTournament = () => {
+        updateStore(data => ({
+          ...data,
+          tournaments: [...data.tournaments, { id: selectedGroup, month: '未定', date: '未定', name: '新規大会', category: '', target: '' }]
+        }));
+      };
+      
+      const updateTournament = (idx, field, value) => {
+        updateStore(data => {
+          const updated = [...data.tournaments];
+          updated[idx][field] = value;
+          return { ...data, tournaments: updated };
+        });
+      };
+
+      const deleteTournament = (idx) => {
+        if(window.confirm('この大会を削除してもよろしいですか？')) {
+          updateStore(data => ({ ...data, tournaments: data.tournaments.filter((_, i) => i !== idx) }));
+        }
+      };
+
+      // --- 育成計画管理 ---
+      const updatePlan = (field, value) => {
+        updateStore(data => ({
+          ...data, plans: { ...data.plans, [selectedGroup]: { ...data.plans[selectedGroup], [field]: value } }
+        }));
+      };
+
+      // --- 練習メニュー管理 ---
+      const handleAddPractice = () => {
+        updateStore(data => {
+          const currentList = data.practices[selectedGroup] || [];
+          const newItem = { id: Date.now(), week: `第${currentList.length + 1}週`, theme: '新規テーマ', drill: '' };
+          return { ...data, practices: { ...data.practices, [selectedGroup]: [...currentList, newItem] } };
+        });
+      };
+
+      const updatePractice = (idx, field, value) => {
+        updateStore(data => {
+          const updated = [...data.practices[selectedGroup]];
+          updated[idx][field] = value;
+          return { ...data, practices: { ...data.practices, [selectedGroup]: updated } };
+        });
+      };
+
+      const deletePractice = (idx) => {
+        if(window.confirm('この練習メニュー枠を削除しますか？')) {
+          updateStore(data => {
+            const updated = data.practices[selectedGroup].filter((_, i) => i !== idx);
+            return { ...data, practices: { ...data.practices, [selectedGroup]: updated } };
+          });
+        }
+      };
+
+      // --- 振り返り管理 ---
+      const updateReflection = (field, value) => {
+        updateStore(data => ({
+          ...data, reflections: { ...data.reflections, [selectedGroup]: { ...data.reflections[selectedGroup], [field]: value } }
+        }));
+      };
+
+      return (
+        <div className="min-h-screen bg-gray-100 flex flex-col">
+          
+          {/* ================= ヘッダー＆タイトル固定エリア ================= */}
+          <div className="fixed top-0 left-0 right-0 z-50 bg-slate-900 text-white shadow-xl border-b-4 border-emerald-500">
+            <div className="max-w-7xl mx-auto px-4 pt-4 pb-3 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+              
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="bg-emerald-500 text-white text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-wider">Soft Tennis Pro</span>
+                  <span className="text-xs text-slate-400 font-bold">一般社団法人 KSTクラブ</span>
+                  <span className={`text-[10px] text-emerald-400 font-bold ml-2 transition-opacity duration-300 ${showSaveMessage ? 'opacity-100' : 'opacity-0'}`}><i className="fas fa-check mr-1"></i>自動保存済</span>
+                </div>
+                <h1 className="text-xl md:text-2xl font-black text-white tracking-tight">大会逆算型 年間育成管理システム</h1>
+              </div>
+              
+              {/* コントロールパネル（チーム・年度・戻る） */}
+              <div className="flex flex-wrap items-center gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700 w-full lg:w-auto">
+                <button onClick={handleUndo} disabled={history.length === 0} className={`text-xs font-bold px-3 py-1.5 rounded transition-all flex items-center gap-1 border ${history.length === 0 ? 'bg-slate-700 text-slate-500 border-slate-600 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-500 shadow-sm'}`}>
+                  <i className="fas fa-undo-alt"></i> 1つ戻る
+                </button>
+                <div className="h-6 w-px bg-slate-600 mx-1"></div>
+                <div className="flex items-center gap-1">
+                  <i className="fas fa-users text-emerald-400 text-xs"></i>
+                  <select className="bg-slate-900 text-white border border-slate-600 font-bold text-sm p-1 rounded focus:ring-1 focus:ring-emerald-500 max-w-[150px] truncate" value={currentTeam} onChange={(e) => setCurrentTeam(e.target.value)}>
+                    {Object.keys(globalStore).map(team => <option key={team} value={team}>{team}</option>)}
+                  </select>
+                  <button onClick={handleAddTeam} className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-2 py-1 rounded text-xs border border-slate-500" title="新規チーム追加"><i className="fas fa-plus"></i></button>
+                </div>
+                <div className="flex items-center gap-1 ml-auto lg:ml-2">
+                  <i className="fas fa-calendar-alt text-emerald-400 text-xs"></i>
+                  <select className="bg-slate-900 text-white border border-slate-600 font-bold text-sm p-1 rounded focus:ring-1 focus:ring-emerald-500" value={actualYear} onChange={(e) => setCurrentYear(e.target.value)}>
+                    {availableYears.map(y => <option key={y} value={y}>{y}年度</option>)}
+                  </select>
+                  <button onClick={handleAddYear} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2 py-1 rounded text-xs" title="次年度を追加"><i className="fas fa-angle-double-right"></i></button>
+                </div>
+              </div>
+            </div>
+
+            {/* ナビゲーションタブ */}
+            <div className="max-w-7xl mx-auto px-4 flex border-t border-slate-800 overflow-x-auto whitespace-nowrap bg-slate-900 scrollbar-hide">
+              <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'calendar' ? 'border-emerald-400 text-emerald-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('calendar')}><i className="fas fa-calendar-alt mr-1.5"></i>① 年間カレンダー</button>
+              <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'plan' ? 'border-emerald-400 text-emerald-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('plan')}><i className="fas fa-bullseye mr-1.5"></i>② 前・後衛 育成計画</button>
+              <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'practice' ? 'border-blue-400 text-blue-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('practice')}><i className="fas fa-walking mr-1.5"></i>③ 週間練習メニュー</button>
+              <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'reflection' ? 'border-rose-400 text-rose-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('reflection')}><i className="fas fa-sync-alt mr-1.5"></i>④ 振り返り(PDCA)</button>
+            </div>
+          </div>
+
+          {/* ================= メインコンテンツ ================= */}
+          <main className="flex-grow max-w-7xl w-full mx-auto p-4 pt-44 lg:pt-32 pb-12">
+            
+            {/* グループセレクター */}
+            {activeTab !== 'calendar' && (
+              <div className="mb-4 bg-white p-3 rounded-lg shadow-sm border border-gray-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-l-4 border-l-emerald-500">
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <span className="text-xs font-black text-gray-600 whitespace-nowrap">編集対象グループ:</span>
+                  <select className="w-full sm:w-auto border border-gray-300 font-bold text-sm p-1.5 rounded bg-gray-50 text-gray-800 focus:ring-2 focus:ring-emerald-400" value={selectedGroup} onChange={(e) => setSelectedGroup(e.target.value)}>
+                    {GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                </div>
+              </div>
+            )}
+
+            {/* ================= TAB ①: カレンダー ================= */}
+            {activeTab === 'calendar' && (
+              <div className="bg-white p-4 rounded-xl shadow-md space-y-4">
+                <div className="flex justify-between items-center border-b pb-3 border-gray-100">
+                  <h2 className="text-lg font-bold text-gray-800">大会スケジュール（{currentTeam} / {actualYear}年度）</h2>
+                  <div className="flex gap-2">
+                    <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>
+                      {GROUPS.map(g => <option key={g.id} value={g.id}>追加先: {g.id}</option>)}
+                    </select>
+                    <button onClick={handleAddTournament} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded"><i className="fas fa-plus mr-1"></i>大会追加</button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse min-w-[950px]">
+                    <thead>
+                      <tr className="bg-gray-50 text-gray-600 text-xs font-bold border-b">
+                        <th className="p-2 w-16 text-center">Grp</th>
+                        <th className="p-2 w-20">開催月</th>
+                        <th className="p-2 w-28 text-center">日程</th>
+                        <th className="p-2 w-72">大会名 / カテゴリ</th>
+                        <th className="p-2">位置付け</th>
+                        <th className="p-2 w-10 text-center">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 text-xs">
+                      {currentData.tournaments.map((t, idx) => (
+                        <tr key={idx} className="hover:bg-emerald-50/30">
+                          <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-white" value={t.id} onChange={(e) => updateTournament(idx, 'id', e.target.value)}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
+                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-bold text-center" value={t.month} onChange={(e) => updateTournament(idx, 'month', e.target.value)}/></td>
+                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-mono text-center font-bold bg-gray-50/50" value={t.date} onChange={(e) => updateTournament(idx, 'date', e.target.value)}/></td>
+                          <td className="p-2 space-y-1">
+                            <input type="text" className="border rounded p-1 w-full font-bold" value={t.name} onChange={(e) => updateTournament(idx, 'name', e.target.value)}/>
+                            <input type="text" className="border rounded p-0.5 w-full text-[10px] text-gray-500 bg-gray-50" value={t.category} onChange={(e) => updateTournament(idx, 'category', e.target.value)} placeholder="カテゴリ"/>
+                          </td>
+                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none" value={t.target} onChange={(e) => updateTournament(idx, 'target', e.target.value)}/></td>
+                          <td className="p-2 text-center">
+                            <button onClick={() => deleteTournament(idx)} className="text-gray-400 hover:text-red-500 transition-colors p-2" title="削除"><i className="fas fa-trash-alt"></i></button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* ================= TAB ②: 育成計画 ================= */}
+            {activeTab === 'plan' && currentData.plans[selectedGroup] && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="bg-white border-t-4 border-emerald-500 p-4 rounded-xl shadow-sm">
+                  <label className="text-[10px] text-gray-500 font-bold block mb-1 uppercase tracking-wider">フェーズの位置付け・狙い</label>
+                  <textarea className="w-full bg-gray-50 border border-gray-200 rounded p-2 text-xs font-bold text-gray-800 leading-relaxed h-12" value={currentData.plans[selectedGroup].position} onChange={(e)=>updatePlan('position', e.target.value)}/>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm space-y-1"><div className="font-bold text-blue-800 text-xs flex items-center gap-1.5 border-b pb-1.5"><i className="fas fa-baseball-ball text-blue-500"></i> 後衛: 技術・配球</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed" value={currentData.plans[selectedGroup].back} onChange={(e)=>updatePlan('back', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm space-y-1"><div className="font-bold text-red-800 text-xs flex items-center gap-1.5 border-b pb-1.5"><i className="fas fa-user-shield text-red-500"></i> 前衛: 技術・動き</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed" value={currentData.plans[selectedGroup].front} onChange={(e)=>updatePlan('front', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm space-y-1"><div className="font-bold text-purple-800 text-xs flex items-center gap-1.5 border-b pb-1.5"><i className="fas fa-users text-purple-500"></i> チーム: 規律・マナー</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed" value={currentData.plans[selectedGroup].team} onChange={(e)=>updatePlan('team', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm space-y-1"><div className="font-bold text-amber-800 text-xs flex items-center gap-1.5 border-b pb-1.5"><i className="fas fa-layer-group text-amber-500"></i> 学年別・習熟度別配慮</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed" value={currentData.plans[selectedGroup].level} onChange={(e)=>updatePlan('level', e.target.value)}/></div>
+                </div>
+              </div>
+            )}
+
+            {/* ================= TAB ③: 練習メニュー ================= */}
+            {activeTab === 'practice' && currentData.practices[selectedGroup] && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="flex justify-end mb-2">
+                  <button onClick={handleAddPractice} className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-2 rounded shadow transition-all"><i className="fas fa-plus mr-1"></i>練習枠を追加</button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {currentData.practices[selectedGroup].map((p, idx) => (
+                    <div key={p.id} className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col relative group">
+                      <div className="bg-gray-100 px-3 py-2 border-b flex justify-between items-center">
+                        <input type="text" className="bg-transparent font-black text-gray-600 text-xs w-32" value={p.week} onChange={(e)=>updatePractice(idx, 'week', e.target.value)}/>
+                        <button onClick={() => deletePractice(idx)} className="text-gray-400 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="削除"><i className="fas fa-times"></i></button>
+                      </div>
+                      <div className="p-3 flex-grow space-y-3 text-xs">
+                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">週間重点テーマ</label><input type="text" className="w-full border border-gray-200 font-bold rounded p-1.5 text-blue-900 bg-gray-50" value={p.theme} onChange={(e)=>updatePractice(idx, 'theme', e.target.value)}/></div>
+                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">練習ドリル・配球内容</label><textarea className="w-full border border-gray-200 rounded p-1.5 h-24 text-gray-700 bg-gray-50 resize-none" value={p.drill} onChange={(e)=>updatePractice(idx, 'drill', e.target.value)}/></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ================= TAB ④: 振り返り ================= */}
+            {activeTab === 'reflection' && currentData.reflections[selectedGroup] && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
+                  <h2 className="text-sm font-bold text-rose-900"><i className="fas fa-sync-alt mr-1.5"></i>大会後 振り返り (PDCA)</h2>
+                  <label className={`flex items-center space-x-2 text-xs font-bold cursor-pointer border px-3 py-1.5 rounded-lg transition-colors ${currentData.reflections[selectedGroup].completed ? 'bg-rose-50 border-rose-300 text-rose-600' : 'bg-white border-gray-300 text-gray-400'}`}>
+                    <input type="checkbox" checked={currentData.reflections[selectedGroup].completed} onChange={(e) => updateReflection('completed', e.target.checked)} className="form-checkbox text-rose-500 rounded w-4 h-4"/>
+                    <span>振り返り完了済</span>
+                  </label>
+                </div>
+
+                <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm space-y-4 text-xs">
+                  <div><label className="block text-sm font-bold text-emerald-700 mb-1"><i className="fas fa-thumbs-up"></i> 成果（機能した技術・戦術）</label><textarea value={currentData.reflections[selectedGroup].good} onChange={(e) => updateReflection('good', e.target.value)} className="w-full border-none bg-emerald-50 rounded p-3 min-h-[90px] leading-relaxed"></textarea></div>
+                  <div><label className="block text-sm font-bold text-rose-700 mb-1"><i className="fas fa-exclamation-triangle"></i> 課題（修正が必要な点）</label><textarea value={currentData.reflections[selectedGroup].bad} onChange={(e) => updateReflection('bad', e.target.value)} className="w-full border-none bg-rose-50 rounded p-3 min-h-[90px] leading-relaxed"></textarea></div>
+                  <div className="pt-2 border-t border-gray-100"><label className="block text-sm font-bold text-blue-700 mb-1"><i className="fas fa-long-arrow-alt-right"></i> 次の練習メニューへの引継ぎ</label><textarea value={currentData.reflections[selectedGroup].nextAction} onChange={(e) => updateReflection('nextAction', e.target.value)} className="w-full border-none bg-blue-50 rounded p-3 min-h-[90px] leading-relaxed"></textarea></div>
+                </div>
+              </div>
+            )}
+
+          </main>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+  <style>
+    .animate-fade-in { animation: fadeIn 0.25s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</body>
+</html>
