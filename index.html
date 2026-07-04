@@ -226,7 +226,8 @@
       // 共通はチーム全体の行事のみを初期値として残す（KST/KSC主催などクラブ単位の行事）
       const common = buildBucketTemplate(null);
       common.tournaments = common.tournaments.filter(t => /KST|KSC/.test(t.name));
-      return { '男子': male, '女子': female, '共通': common };
+      // groupSettings は年度ごとに保持する（年度を変えても別年度のグループ名が変わらないようにする）
+      return { '男子': male, '女子': female, '共通': common, groupSettings: {} };
     };
 
     const initialGlobalStore = {
@@ -333,10 +334,11 @@
 
     const AdminPage = ({ profile, onBack }) => {
       const [users, setUsers] = useState(null);
-      const [groupSettings, setGroupSettings] = useState({});
-      const adminGroups = mergeGroupSettings(groupSettings);
       const [teams, setTeams] = useState([]);
+      const [teamYearsMap, setTeamYearsMap] = useState({});
       const [teamsLoading, setTeamsLoading] = useState(true);
+      const [groupEditTeam, setGroupEditTeam] = useState('');
+      const [groupEditYear, setGroupEditYear] = useState('');
 
       const [name, setName] = useState('');
       const [email, setEmail] = useState('');
@@ -363,29 +365,61 @@
       }, []);
 
       useEffect(() => {
-        const unsub = db.collection('appSettings').doc('ui').onSnapshot(doc => {
-          setGroupSettings((doc.exists && doc.data().groups) ? doc.data().groups : {});
-        });
-        return unsub;
-      }, []);
-
-      const updateGroupName = (groupId, name) => {
-        db.collection('appSettings').doc('ui').set({
-          groups: { [groupId]: { name: name || DEFAULT_GROUPS.find(g => g.id === groupId).name } }
-        }, { merge: true });
-      };
-
-
-      useEffect(() => {
         const unsub = db.collection('teams').onSnapshot(snap => {
-          const list = snap.docs.map(d => d.id).sort();
+          const yearsMap = {};
+          snap.docs.forEach(d => { yearsMap[d.id] = (d.data() && d.data().years) ? d.data().years : {}; });
+          const list = Object.keys(yearsMap).sort();
           setTeams(list);
+          setTeamYearsMap(yearsMap);
           setTeamsLoading(false);
-          // 新規アカウント作成フォームの初期チェックは、まだ何も選んでいなければ全チームにしておく
           setNewUserTeams(prev => prev.length ? prev : list);
+          setGroupEditTeam(prev => prev && list.includes(prev) ? prev : (list[0] || ''));
         }, () => setTeamsLoading(false));
         return unsub;
       }, []);
+
+      const groupEditYears = groupEditTeam && teamYearsMap[groupEditTeam] ? Object.keys(teamYearsMap[groupEditTeam]).sort() : [];
+      useEffect(() => {
+        if (groupEditYears.length && !groupEditYears.includes(groupEditYear)) setGroupEditYear(groupEditYears[0]);
+      }, [groupEditTeam, JSON.stringify(groupEditYears), groupEditYear]);
+
+      const selectedAdminYearData = (groupEditTeam && groupEditYear && teamYearsMap[groupEditTeam] && teamYearsMap[groupEditTeam][groupEditYear]) ? teamYearsMap[groupEditTeam][groupEditYear] : null;
+      const adminGroups = mergeGroupSettings((selectedAdminYearData && selectedAdminYearData.groupSettings) || {});
+
+      const saveYearGroupSettings = async (nextSettings) => {
+        if (!groupEditTeam || !groupEditYear || !selectedAdminYearData) return;
+        const currentYears = teamYearsMap[groupEditTeam] || {};
+        const nextYears = {
+          ...currentYears,
+          [groupEditYear]: { ...selectedAdminYearData, groupSettings: nextSettings }
+        };
+        await db.collection('teams').doc(groupEditTeam).set({
+          years: nextYears,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedBy: profile.name || profile.email
+        }, { merge: true });
+      };
+
+      const updateGroupName = (groupId, name) => {
+        const base = (selectedAdminYearData && selectedAdminYearData.groupSettings) || {};
+        const defaultName = DEFAULT_GROUPS.find(g => g.id === groupId).name;
+        saveYearGroupSettings({ ...base, [groupId]: { name: name || defaultName } });
+      };
+
+      const resetGroupNames = () => {
+        if (!window.confirm(`${groupEditTeam} / ${groupEditYear}年度のグループ名を初期設定に戻しますか？`)) return;
+        saveYearGroupSettings({});
+      };
+
+      const copyGroupNamesFromPreviousYear = () => {
+        if (!groupEditTeam || !groupEditYear) return;
+        const years = groupEditYears;
+        const idx = years.indexOf(groupEditYear);
+        if (idx <= 0) { alert('コピー元になる前年度がありません。'); return; }
+        const prevYear = years[idx - 1];
+        const prevSettings = (teamYearsMap[groupEditTeam][prevYear] && teamYearsMap[groupEditTeam][prevYear].groupSettings) || {};
+        saveYearGroupSettings(prevSettings);
+      };
 
       // ---- コーチ/管理者アカウントの追加 ----
       const handleAddCoach = async (e) => {
@@ -502,9 +536,21 @@
           <div className="max-w-5xl mx-auto p-4 space-y-6">
 
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-              <div className="flex justify-between items-center mb-3">
-                <h2 className="font-black text-gray-800 text-sm"><i className="fas fa-layer-group text-purple-500 mr-1.5"></i>グループ設定</h2>
-                <span className="text-[10px] text-gray-400 font-bold">表示名のみ変更できます（A〜J/共通の内部IDは固定）</span>
+              <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-3 mb-3">
+                <div>
+                  <h2 className="font-black text-gray-800 text-sm"><i className="fas fa-layer-group text-purple-500 mr-1.5"></i>グループ設定</h2>
+                  <p className="text-[10px] text-gray-400 font-bold mt-1">チーム・年度ごとに別々に保存します（A〜J/共通の内部IDは固定）</p>
+                </div>
+                <div className="flex flex-wrap gap-2 items-center">
+                  <select value={groupEditTeam} onChange={e=>setGroupEditTeam(e.target.value)} className="border border-gray-300 rounded p-1.5 text-xs font-bold bg-white">
+                    {teams.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  <select value={groupEditYear} onChange={e=>setGroupEditYear(e.target.value)} className="border border-gray-300 rounded p-1.5 text-xs font-bold bg-white">
+                    {groupEditYears.map(y => <option key={y} value={y}>{y}年度</option>)}
+                  </select>
+                  <button onClick={copyGroupNamesFromPreviousYear} className="bg-blue-50 text-blue-600 hover:bg-blue-100 text-[11px] font-bold px-2 py-1.5 rounded"><i className="fas fa-copy mr-1"></i>前年度からコピー</button>
+                  <button onClick={resetGroupNames} className="bg-gray-100 hover:bg-gray-200 text-gray-600 text-[11px] font-bold px-2 py-1.5 rounded"><i className="fas fa-undo mr-1"></i>初期名に戻す</button>
+                </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {adminGroups.map(g => (
@@ -518,7 +564,7 @@
                   </div>
                 ))}
               </div>
-              <p className="text-[10px] text-gray-400 mt-2">※ここで変更したグループ名は、ダッシュボード・計画・練習・振り返り・大会スケジュールの選択肢に反映されます。</p>
+              <p className="text-[10px] text-gray-400 mt-2">※年度を変えても、別年度のグループ名は変更されません。必要な時だけ「前年度からコピー」を押してください。</p>
             </div>
 
             {/* ---- チーム管理 ---- */}
@@ -698,8 +744,7 @@
 
     const TrainingApp = ({ profile, onGoAdmin, onLogout }) => {
       const [globalStore, setGlobalStore] = useState(null);
-      const [groupSettings, setGroupSettings] = useState({});
-      const groupList = mergeGroupSettings(groupSettings);
+      const [legacyGroupSettings, setLegacyGroupSettings] = useState({});
       const [isLoading, setIsLoading] = useState(true);
 
       const [currentTeam, setCurrentTeam] = useState(() => localStorage.getItem('kst_v6_team') || "西ノ京中学校");
@@ -755,8 +800,9 @@
       }, []);
 
       useEffect(() => {
+        // 旧バージョンで全年度共通に保存していたグループ名がある場合だけ、初期表示の予備として読む
         const unsub = db.collection('appSettings').doc('ui').onSnapshot(doc => {
-          setGroupSettings((doc.exists && doc.data().groups) ? doc.data().groups : {});
+          setLegacyGroupSettings((doc.exists && doc.data().groups) ? doc.data().groups : {});
         });
         return unsub;
       }, []);
@@ -784,6 +830,7 @@
       const actualYear = availableYears.includes(currentYear) ? currentYear : availableYears[0];
       let yearData = teamData[actualYear];
       if (!yearData || !yearData['男子']) yearData = generateYearData();
+      const groupList = mergeGroupSettings(yearData.groupSettings || legacyGroupSettings);
       const currentData = normalizeBucketData(yearData[currentBucket]);
 
       // チーム / 年度 / 男女共通バケツを切り替えたら、そのチーム・そのバケツが
@@ -858,7 +905,7 @@
             const tournamentsByBucket = {};
             BUCKETS.forEach(b => {
               tournamentsByBucket[b] = ((yearBuckets[b] && yearBuckets[b].tournaments) || []).map(t => ({
-                group: inferTournamentGroup(t), month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || ''
+                group: inferTournamentGroup(t), month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || '', eventType: t.eventType || guessEventType(t), place: t.place || '', meeting: t.meeting || '', belongings: t.belongings || '', notice: t.notice || '', parentVisible: t.parentVisible !== false
               }));
             });
             db.collection('publicCalendars').doc(teamName).set({
@@ -906,6 +953,8 @@
             newYearData[b].plans = teamData[actualYear][b].plans;
             newYearData[b].practices = teamData[actualYear][b].practices;
           });
+          // 新年度作成時だけ、現在年度のグループ名を初期値として引き継ぐ（作成後は年度ごとに独立）
+          newYearData.groupSettings = { ...(teamData[actualYear].groupSettings || legacyGroupSettings || {}) };
           const newTeamYears = { ...teamData, [nextYear]: newYearData };
           setHistory(prev => [...prev, globalStore]);
           setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
@@ -972,6 +1021,52 @@
         }
       };
 
+
+      // ---- 便利機能: 日付・種別・未入力チェック ----
+      const guessEventType = (t) => {
+        const txt = `${t.name || ''} ${t.category || ''}`;
+        if (/締切|〆切|申込/.test(txt)) return '締切';
+        if (/練習試合|交流戦|Training|MATCH|カップ/.test(txt)) return '練習試合';
+        if (/練習|強化/.test(txt) && !/大会/.test(txt)) return '練習';
+        return '大会';
+      };
+      const eventTypeStyle = (type) => {
+        if (type === '練習') return 'bg-blue-50 text-blue-700 border-blue-200';
+        if (type === '練習試合') return 'bg-amber-50 text-amber-700 border-amber-200';
+        if (type === '締切') return 'bg-rose-50 text-rose-700 border-rose-200';
+        if (type === 'イベント') return 'bg-purple-50 text-purple-700 border-purple-200';
+        return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+      };
+      const parseEventDate = (t) => {
+        const y = Number(actualYear);
+        const m1 = String(t.month || '').match(/(\d{1,2})\s*月/);
+        const d1 = String(t.date || '').match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})?/);
+        const m = d1 && d1[2] ? Number(d1[1]) : (m1 ? Number(m1[1]) : null);
+        const d = d1 && d1[2] ? Number(d1[2]) : (d1 ? Number(d1[1]) : null);
+        if (!y || !m || !d) return null;
+        const dt = new Date(y, m - 1, d);
+        return Number.isNaN(dt.getTime()) ? null : dt;
+      };
+      const datedEvents = (currentData.tournaments || []).map((t, idx) => ({...t, idx, parsedDate: parseEventDate(t), type: t.eventType || guessEventType(t)}));
+      const today = new Date(); today.setHours(0,0,0,0);
+      const upcomingEvents = datedEvents.filter(e => e.parsedDate && e.parsedDate >= today).sort((a,b)=>a.parsedDate-b.parsedDate);
+      const nextEvent = upcomingEvents[0] || null;
+      const daysToNext = nextEvent ? Math.ceil((nextEvent.parsedDate - today) / 86400000) : null;
+      const currentPractices = currentData.practices[selectedGroup] || [];
+      const thisWeekPractice = currentPractices[0] || {};
+      const incompleteItems = [];
+      (currentData.tournaments || []).forEach(t => {
+        if (!t.date || /未定|確定後|随時/.test(String(t.date))) incompleteItems.push(`日程未定：${t.name}`);
+        if ((t.type === '大会' || guessEventType(t) === '大会') && !t.result) incompleteItems.push(`結果未入力：${t.name}`);
+        if (t.parentVisible !== false && (!t.place || !t.meeting)) incompleteItems.push(`保護者情報不足：${t.name}`);
+      });
+      groupList.forEach(g => {
+        const r = currentData.reflections[g.id];
+        if (!r || (!r.completed && !r.good && !r.bad && !r.nextAction)) incompleteItems.push(`振り返り未入力：${g.name}`);
+      });
+      const monthLabels = ['4月','5月','6月','7月','8月','9月','10月','11月','12月','1月','2月','3月'];
+      const eventsByMonth = monthLabels.map(label => ({ label, events: datedEvents.filter(e => String(e.month || '').includes(label.replace('月','')) || String(e.month || '') === label) }));
+      const updateTournamentExtra = (idx, field, value) => updateTournament(idx, field, value);
       const themeConfig = {
         '男子': { bg: 'bg-blue-600', hover: 'hover:bg-blue-500', text: 'text-blue-500', border: 'border-blue-500', dashBg: 'from-blue-600 to-blue-800' },
         '女子': { bg: 'bg-pink-500', hover: 'hover:bg-pink-400', text: 'text-pink-500', border: 'border-pink-500', dashBg: 'from-pink-500 to-pink-700' },
@@ -1037,6 +1132,7 @@
               <div className="flex overflow-x-auto whitespace-nowrap scrollbar-hide flex-grow">
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'dashboard' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('dashboard')}><i className="fas fa-home mr-1.5"></i>HOME</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'calendar' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('calendar')}><i className="fas fa-calendar-alt mr-1.5"></i>カレンダー</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'parent' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('parent')}><i className="fas fa-mobile-alt mr-1.5"></i>保護者表示</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'plan' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('plan')}><i className="fas fa-bullseye mr-1.5"></i>育成計画</button>
                 <button className={`relative py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'practice' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('practice')}><i className="fas fa-walking mr-1.5"></i>練習メニュー{anyPracticeReview && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400"></span>}</button>
                 <button className={`relative py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'reflection' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('reflection')}><i className="fas fa-sync-alt mr-1.5"></i>振り返り{anyReflectionReview && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400"></span>}</button>
@@ -1065,6 +1161,38 @@
 
             {activeTab === 'dashboard' && (
               <div className="space-y-6 fade-in">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <div className={`lg:col-span-2 rounded-2xl p-5 text-white shadow-xl bg-gradient-to-br ${theme.dashBg}`}>
+                    <div className="text-[11px] font-black opacity-80 mb-2"><i className="fas fa-forward mr-1.5"></i>次の予定</div>
+                    {nextEvent ? (
+                      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+                        <div>
+                          <div className="text-4xl font-black">あと{daysToNext}日</div>
+                          <div className="text-lg font-black mt-1">{nextEvent.name}</div>
+                          <div className="text-xs opacity-80 mt-1">{nextEvent.month} {nextEvent.date} / {nextEvent.place || '場所未入力'}</div>
+                        </div>
+                        <button onClick={() => { setActiveTab('calendar'); setSelectedGroup(inferTournamentGroup(nextEvent)); }} className="bg-white/20 hover:bg-white/30 text-white text-xs font-bold px-3 py-2 rounded-lg no-print">詳細を開く</button>
+                      </div>
+                    ) : <div className="text-sm font-bold opacity-80">日付が入った今後の予定はまだありません。</div>}
+                  </div>
+                  <div className="bg-white rounded-2xl p-5 border border-gray-200 shadow-md">
+                    <div className="text-gray-500 text-xs font-black mb-2"><i className="fas fa-clipboard-check mr-1.5 text-emerald-500"></i>今日やること</div>
+                    <div className="font-black text-gray-800 mb-1">{thisWeekPractice.theme || 'テーマ未入力'}</div>
+                    <div className="text-xs text-gray-600 whitespace-pre-wrap line-clamp-4">{thisWeekPractice.drill || '練習メニューを入力してください。'}</div>
+                  </div>
+                </div>
+                <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
+                  <div className="flex items-center justify-between border-b pb-2 mb-3">
+                    <h3 className="font-black text-gray-800 text-sm"><i className="fas fa-exclamation-circle text-amber-500 mr-2"></i>未入力チェック</h3>
+                    <span className="text-[11px] font-black text-gray-500">{incompleteItems.length}件</span>
+                  </div>
+                  {incompleteItems.length === 0 ? <p className="text-xs font-bold text-emerald-600">未入力はありません。</p> : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {incompleteItems.slice(0,8).map((item,i)=><div key={i} className="text-xs bg-amber-50 text-amber-700 border border-amber-100 rounded-lg px-3 py-2 font-bold">{item}</div>)}
+                    </div>
+                  )}
+                </div>
+
 
                 <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
                   <div>
@@ -1168,12 +1296,26 @@
                     <button onClick={exportTournamentsCsv} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors"><i className="fas fa-file-csv mr-1"></i>CSV書き出し</button>
                   </div>
                 </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+                  {eventsByMonth.map(m => (
+                    <div key={m.label} className="border border-gray-200 rounded-xl bg-gray-50 p-3 min-h-[92px]">
+                      <div className="font-black text-gray-700 text-sm mb-2">{m.label}</div>
+                      <div className="space-y-1">
+                        {m.events.length === 0 && <div className="text-[10px] text-gray-400">予定なし</div>}
+                        {m.events.slice(0,4).map(e => (
+                          <button key={e.idx} onClick={() => setSelectedGroup(inferTournamentGroup(e))} className={`block w-full text-left text-[10px] font-bold px-2 py-1 rounded border truncate ${eventTypeStyle(e.type)}`}>{e.date} {e.name}</button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
                 <div className="overflow-x-auto print-break-inside-avoid">
                   <table className="w-full text-left border-collapse min-w-[1000px]">
                     <thead>
                       <tr className="bg-gray-50 text-gray-600 text-xs font-bold border-b">
                         <th className="p-2 w-16 text-center">Grp</th><th className="p-2 w-20">開催月</th><th className="p-2 w-28 text-center">日程</th>
-                        <th className="p-2 w-64">大会名 / カテゴリ</th><th className="p-2">位置付け</th><th className="p-2 w-48">結果</th><th className="p-2 w-10 text-center no-print">操作</th>
+                        <th className="p-2 w-64">大会名 / カテゴリ</th><th className="p-2">位置付け</th><th className="p-2 w-40">保護者情報</th><th className="p-2 w-48">結果</th><th className="p-2 w-10 text-center no-print">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 text-xs">
@@ -1187,6 +1329,14 @@
                             <input type="text" className="border-none p-0.5 w-full text-[10px] text-gray-500 bg-transparent" value={t.category} onChange={(e) => updateTournament(idx, 'category', e.target.value)} placeholder="カテゴリ" readOnly={isViewer}/>
                           </td>
                           <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none bg-transparent leading-relaxed" value={t.target} onChange={(e) => updateTournament(idx, 'target', e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2 space-y-1">
+                            <select value={t.eventType || guessEventType(t)} onChange={e=>updateTournamentExtra(idx,'eventType',e.target.value)} disabled={isViewer} className="border rounded p-1 w-full text-[10px] font-bold bg-transparent"><option>大会</option><option>練習</option><option>練習試合</option><option>締切</option><option>イベント</option></select>
+                            <input value={t.place || ''} onChange={e=>updateTournamentExtra(idx,'place',e.target.value)} readOnly={isViewer} placeholder="場所" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
+                            <input value={t.meeting || ''} onChange={e=>updateTournamentExtra(idx,'meeting',e.target.value)} readOnly={isViewer} placeholder="集合" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
+                            <input value={t.belongings || ''} onChange={e=>updateTournamentExtra(idx,'belongings',e.target.value)} readOnly={isViewer} placeholder="持ち物" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
+                            <textarea value={t.notice || ''} onChange={e=>updateTournamentExtra(idx,'notice',e.target.value)} readOnly={isViewer} placeholder="連絡事項" className="border rounded p-1 w-full h-10 text-[10px] bg-transparent resize-none"></textarea>
+                            <label className="flex items-center gap-1 text-[10px] text-gray-500 font-bold"><input type="checkbox" checked={t.parentVisible !== false} onChange={e=>updateTournamentExtra(idx,'parentVisible',e.target.checked)} disabled={isViewer}/>保護者表示</label>
+                          </td>
                           <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-emerald-700 resize-none bg-emerald-50 leading-relaxed" placeholder="順位・戦績・結果メモ" value={t.result || ''} onChange={(e) => updateTournamentResult(idx, e.target.value)} readOnly={isViewer}/></td>
                           <td className="p-2 text-center no-print">{!isViewer && <button onClick={() => deleteTournament(idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>}</td>
                         </tr>
@@ -1194,6 +1344,40 @@
                     </tbody>
                   </table>
 
+                </div>
+              </div>
+            )}
+
+
+            {activeTab === 'parent' && (
+              <div className="space-y-4 fade-in">
+                <div className="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                  <div className="bg-slate-900 text-white p-4">
+                    <div className="text-[10px] font-black text-slate-400">保護者向けに見える内容の確認</div>
+                    <h2 className="text-lg font-black">{currentTeam} {currentBucket === '共通' ? 'チーム共通' : currentBucket} 連絡ページ</h2>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    {nextEvent && (
+                      <div className="border border-blue-100 bg-blue-50 rounded-xl p-4">
+                        <div className="text-[11px] font-black text-blue-500 mb-1">次回活動</div>
+                        <div className="text-xl font-black text-gray-800">{nextEvent.name}</div>
+                        <div className="text-sm font-bold text-gray-600 mt-1">{nextEvent.month} {nextEvent.date} / {nextEvent.place || '場所未入力'} / 集合 {nextEvent.meeting || '未入力'}</div>
+                        {nextEvent.belongings && <div className="text-xs mt-2"><span className="font-black">持ち物：</span>{nextEvent.belongings}</div>}
+                        {nextEvent.notice && <div className="text-xs mt-2 bg-white border border-blue-100 rounded p-2 whitespace-pre-wrap"><span className="font-black">連絡事項：</span>{nextEvent.notice}</div>}
+                      </div>
+                    )}
+                    <div className="divide-y divide-gray-100">
+                      {(currentData.tournaments || []).filter(t => t.parentVisible !== false).map((t, idx) => (
+                        <div key={t.id || idx} className="py-3 grid grid-cols-1 md:grid-cols-5 gap-2 text-sm">
+                          <div className="font-black text-blue-600">{t.month}<br/><span className="text-xs text-gray-500">{t.date}</span></div>
+                          <div className="md:col-span-2"><div className="font-black text-gray-800">{t.name}</div><div className="text-[11px] text-gray-400">{t.eventType || guessEventType(t)} / {t.category}</div></div>
+                          <div className="text-xs text-gray-600">{t.place || '場所未入力'}<br/>集合：{t.meeting || '未入力'}</div>
+                          <div className="text-xs text-gray-600 whitespace-pre-wrap">{t.notice || t.belongings || '連絡事項なし'}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="pt-3 border-t no-print"><button onClick={copyPublicLink} className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-link mr-1"></i>保護者向け共有リンクをコピー</button></div>
+                  </div>
                 </div>
               </div>
             )}
@@ -1378,7 +1562,7 @@
         return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white p-4 text-center"><p className="font-bold text-sm">このチームの公開カレンダーはまだ準備されていません。</p></div>;
       }
       const tournaments = data.tournaments || {};
-      const buckets = Object.keys(tournaments).filter(b => (tournaments[b] || []).length);
+      const buckets = Object.keys(tournaments).filter(b => (tournaments[b] || []).filter(t => t.parentVisible !== false).length);
       return (
         <div className="min-h-screen bg-gray-100">
           <div className="bg-slate-900 text-white py-5 px-4 text-center">
@@ -1392,11 +1576,14 @@
               <div key={b} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="bg-gray-50 px-4 py-2 font-black text-sm text-gray-700 border-b">{b === '共通' ? 'チーム共通' : b}</div>
                 <div className="divide-y divide-gray-100">
-                  {tournaments[b].map((t, i) => (
+                  {tournaments[b].filter(t => t.parentVisible !== false).map((t, i) => (
                     <div key={i} className="p-3 text-sm flex flex-col sm:flex-row sm:items-center gap-2">
                       <span className="font-black text-blue-600 w-20 shrink-0">{t.month} {t.date && t.date !== '日程確定後記入' ? `(${t.date})` : ''}</span>
                       <div className="flex-grow">
                         <div className="font-bold text-gray-800">{t.name} {t.category && <span className="text-[10px] text-gray-400">（{t.category}）</span>}</div>
+                        {(t.place || t.meeting) && <div className="text-gray-500 text-xs font-bold mt-1">{t.place || '場所未入力'} {t.meeting && ` / 集合 ${t.meeting}`}</div>}
+                        {t.belongings && <div className="text-gray-500 text-xs mt-1">持ち物：{t.belongings}</div>}
+                        {t.notice && <div className="text-gray-600 text-xs mt-1 whitespace-pre-wrap">{t.notice}</div>}
                         {t.result && <div className="text-emerald-600 text-xs font-bold mt-1"><i className="fas fa-trophy mr-1"></i>{t.result}</div>}
                       </div>
                     </div>
