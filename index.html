@@ -16,21 +16,16 @@
 
   <style>
     body { font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif; }
-    .tab-active { border-bottom: 3px solid #10b981; color: #10b981; font-weight: bold; background-color: #f0fdf4; }
+    .tab-active { border-bottom: 3px solid currentColor; font-weight: bold; background-color: rgba(255,255,255,0.1); }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #f1f1f1; }
-    ::-webkit-scrollbar-thumb { background: #10b981; border-radius: 3px; }
-    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #10b981; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid currentColor; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    
-    /* 印刷用スタイル（印刷時に不要なUIを消す） */
     @media print {
-      body { background: white; }
-      .no-print { display: none !important; }
-      .print-only { display: block !important; }
+      body { background: white; } .no-print { display: none !important; } .print-only { display: block !important; }
       .shadow-md, .shadow-xl, .shadow-sm { box-shadow: none !important; border: 1px solid #ccc !important; }
-      main { padding-top: 0 !important; }
-      .print-break-inside-avoid { break-inside: avoid; }
+      main { padding-top: 0 !important; } .print-break-inside-avoid { break-inside: avoid; }
     }
   </style>
 </head>
@@ -52,35 +47,84 @@
     if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
 
-    // ================= 定数・初期データ =================
+    // ================= 定数・初期データ (完全復元版) =================
     const GROUPS = [
       { id: 'A', name: 'グループA (4月 春季総体)' }, { id: 'B', name: 'グループB (5月 国スポ選考会)' },
-      { id: 'C', name: 'グループC (6月 個人予選)' }, { id: 'D', name: 'グループD (7月 市・府大会)' },
+      { id: 'C', name: 'グループC (6月 個人予選・京都C)' }, { id: 'D', name: 'グループD (7月 市・府大会)' },
       { id: 'E', name: 'グループE (8月 近畿・全国等)' }, { id: 'F', name: 'グループF (9-10月 秋季新人)' },
       { id: 'G', name: 'グループG (11月 府新人等)' }, { id: 'H', name: 'グループH (12月 インドア等)' },
       { id: 'I', name: 'グループI (1月 冬季強化)' }, { id: 'J', name: 'グループJ (3月 集大成)' },
-      { id: '共通', name: 'グループ共通 (随時)' }
+      { id: '共通', name: 'グループ共通 (随時調整)' }
     ];
     const GENDERS = ['男子', '女子', '共通'];
 
-    const generateEmptyData = () => {
-      const plans = {}; const practices = {}; const reflections = {};
-      GROUPS.forEach(g => {
-        plans[g.id] = { position: '', back: '', front: '', team: '', level: '' };
-        practices[g.id] = [{ id: Date.now() + Math.random(), week: '第1週', theme: '', drill: '' }];
-        reflections[g.id] = { completed: false, good: '', bad: '', nextAction: '' };
-      });
-      return { tournaments: [], plans, practices, reflections };
+    // CSV 02_大会カレンダーの全25件
+    const initialTournaments = [
+      { id: 'A', month: '4月', date: '4/25', name: '京都市中学校春季総合体育大会', category: '団体・個人', target: '新チーム始動・基本の定着を評価' },
+      { id: 'B', month: '5月', date: '5/24', name: '国民スポーツ大会U-14選考会', category: '個人', target: 'トップ選手の個人選抜評価' },
+      { id: 'C', month: '6月', date: '日程確定後記入', name: '個人ブロック予選', category: '個人', target: '夏本戦へ向けた個人実戦評価' },
+      { id: 'C', month: '6月', date: '日程確定後記入', name: '京都カップ中学校', category: '個人・団体', target: '実戦強化・経験値の評価' },
+      { id: 'D', month: '7月', date: '日程確定後記入', name: '京都市大会（団体・個人）', category: '団体・個人', target: '夏季シーズン第一関門' },
+      { id: 'D', month: '7月', date: '日程確定後記入', name: '京都府大会（団体・個人）', category: '団体・個人', target: '近畿・全国につながる最重要関門' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '近畿大会', category: '団体・個人', target: '全国につながるトップ選手評価' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '全国中学校大会', category: '団体・個人', target: '1年間の頂点の評価' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '京都府中学生研修大会', category: '団体・個人', target: '選外選手の再評価・次年度育成' },
+      { id: 'E', month: '8月', date: '日程確定後記入', name: '京都府選手権（ランキング対象）', category: '個人', target: '個人の年間ランキング評価' },
+      { id: 'F', month: '9〜10月', date: '日程確定後記入', name: '京都市中学校秋季新人大会（団体・個人）', category: '団体・個人', target: '新チーム発足の初評価' },
+      { id: 'G', month: '11月', date: '日程確定後記入', name: '京都府中学校秋季新人大会', category: '団体・個人', target: '新チームの実戦評価' },
+      { id: 'G', month: '11月', date: '日程確定後記入', name: 'KSTグロースカップ', category: '個人', target: '育成カップ・実戦経験の場' },
+      { id: 'G', month: '11月', date: '11/28', name: '京都府スポーツ協会主催大会（太陽が丘）', category: '団体・個人', target: '新チームの育成評価機会' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '京都府ソフトテニスフェスティバル', category: '団体・個人', target: '交流・裾野拡大' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '都道府県対抗選考会', category: '個人', target: '代表選手選出評価' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '京都府1年生大会', category: '個人', target: '1年生の育成評価' },
+      { id: 'H', month: '12月', date: '日程確定後記入', name: '近畿インドア大会', category: '団体・個人', target: '冬季の実戦評価' },
+      { id: 'I', month: '1月', date: '日程確定後記入', name: 'KSTグロースカップ', category: '個人', target: '冬季強化の中間評価' },
+      { id: 'I', month: '1月', date: '1/10', name: 'KST主催大会（太陽が丘）', category: '団体・個人', target: '育成評価機会' },
+      { id: 'I', month: '1月', date: '日程確定後記入', name: 'ALL DAY MATCH', category: '団体・個人', target: '長時間実戦の評価' },
+      { id: 'J', month: '3月', date: '日程確定後記入', name: '都道府県対抗 全日本中学生大会', category: '団体', target: '年度の集大成・代表戦' },
+      { id: 'J', month: '3月', date: '日程確定後記入', name: 'KSTグロースカップ', category: '個人', target: '1年間の成長確認' },
+      { id: 'J', month: '3月', date: '3/20', name: 'KST主催大会（太陽が丘）', category: '団体・個人', target: '送り出しの評価機会' },
+      { id: '共通', month: '不定期', date: '随時', name: 'KSC主催練習試合（亀岡）', category: '団体・個人', target: '直近の課題に応じた実戦調整' }
+    ];
+
+    // CSV 03_大会別逆算育成計画からの完全マッピング
+    const initialPlans = {
+      'A': { position: '新チーム（新3年生中心）が今どこまで基本を積み上げているかを測る「スタートライン確認大会」。', back: 'サーブ・レシーブの安定した基本フォーム、ストロークの基礎精度。\nシンプルな役割分担と、ラリーを続ける展開力。', front: '前に出るか下がるか等、基本的な状況判断ができる。\nボレーの基本精度。', team: '初めての大会の緊張との向き合い方、試合中の切り替え。\n挨拶・時間厳守・応援マナーなど、チームとしての基本行動。', level: '基礎技術（サーブ・レシーブ）のミス傾向の把握、新チームの連携課題抽出。\n国スポ選考向けトップ層の絞り込み。' },
+      'B': { position: '府内トップ層選手の「個人選抜」大会。チーム全体の育成ではなくトップ選手の実力を測る評価日。', back: '高い精度のストローク。\n対戦相手のレベルに応じた戦術変更力。', front: '高い精度のボレー、決定力のあるスマッシュ。\n際どい場面での高精度な判断。', team: 'プレッシャー下での集中力の維持。\n選ばれる選手としての自覚、チームメイトへの手本行動。', level: '選考結果の技術的要因分析、選外選手への個別フィードバック。' },
+      'C': { position: '夏の本戦（市・府大会）に向けた「個人実戦強化」の場。予選突破の実戦耐性。', back: '実戦で崩れないサーブ・レシーブの再現性。\n相手の苦手を突く組み立て。', front: 'ペアとしての意思統一。\n予選特有の「勝ちに行く場面」の見極め。', team: '格上・格下いずれにも動揺しない安定感。\n対戦相手・審判への礼儀、負けた試合を次に活かす姿勢。', level: '予選突破／敗退の要因整理、ペア構成の見直し検討。' },
+      'D': { position: '夏季シーズン最大の関門。近畿・全国大会につながる公式戦であり、育成の中間評価日。', back: 'プレッシャー下でも崩れない基本技術の再現性。\n対戦相手分析に基づく戦術選択。', front: '決定力のあるショット。\nチームとしての勝ちパターンの確立。', team: '大舞台でのメンタルコントロール、大事な場面での冷静な判断。\n応援・声出しでチームを支える姿勢。', level: '近畿・全国進出可否の要因分析。\n進出者は仕上げへ、非進出者は再評価へ切り替え。' },
+      'E': { position: '年間の頂点にあたる評価月。トップ選手の「集大成」と選外選手の「再評価・次年度育成」。', back: '全国レベルに対応する高精度・高再現性の技術（近畿・全国）。\n基礎の再確認と応用（研修大会）。', front: '格上との対戦を想定した戦術の幅。\n一瞬の判断が結果を左右する場面での的確な選択。', team: '大舞台での自信。研修大会では切り替えて次につなげるメンタル。\n府代表としての振る舞い。', level: '全国レベルとの差の具体的分析。\n個人ごとの伸びしろ整理、新チームへの引き継ぎ開始。' },
+      'F': { position: '3年生引退後、新チーム（2年生以下中心）の発足評価日。1年間積み上げた基礎がどこまで機能するかを測る。', back: '新チーム主力の基礎技術の総点検。\nサーブ・レシーブの安定化。', front: '新しいペア・新しい役割での連携構築。\n経験不足を、基本に忠実な判断で補う。', team: '「自分たちが主役」という自覚とプレッシャー耐性づくり。\n新チームのリーダーシップの芽を育てる。', level: '新チームの連携・リーダーシップの課題抽出。\n冬季練習の課題別強化へ。' },
+      'G': { position: '新チームの実戦経験を積む「育成カップ月間」。成長を多面的に評価する。', back: '新人大会で見えた課題の実戦での修正。\n複数大会を通じた戦術パターンの引き出し増加。', front: '場数を踏むことによる判断スピードの向上。', team: '連続して試合をこなす中での集中力の持続。\n「支える側（運営・応援）」としての役割も経験させる。', level: '新人大会からの成長度比較。\n冬季練習で優先すべき項目の絞り込み。' },
+      'H': { position: 'フェスティバル(交流)、選考会(代表)、1年生大会(半年評価)、近畿インドア(冬季実戦)が集中する月。', back: '1年生は基礎技術の定着度確認。\n上級生は冬季練習に向けた課題明確化。', front: 'インドア独特のコート感覚への対応。\n1年生は「まず繋げる」戦術意識。', team: '1年生は「大会は楽しい」という経験獲得、上級生は選考のプレッシャー対応。\n他校との交流マナー。', level: '1年生の技術定着度と今後の指導優先順位。\n強化選手の絞り込み。' },
+      'I': { position: '冬季強化期間の成果を確認する中間実戦評価。フォーム改善・体力強化の成果を試す。', back: '冬季に取り組んだフォーム改善の実戦での再現。\nALL DAY MATCHでの長時間試合を通じた戦術持続力。', front: '1日複数試合をこなす中での判断の安定性。', team: '春大会シーズンへの意欲づけ。\n長時間の試合でも崩れないメンタル、運営を通じた責任感。', level: 'フォーム改善の定着度チェック。\n体力面での春季大会に向けた課題確認。' },
+      'J': { position: '年度の集大成大会。1年間の成長を確認し新年度・新入部員へ引き継ぐ「送り出しの評価日」。', back: '1年間で身につけた技術の完成度確認。\nチーム・個人としての戦術の総仕上げ。', front: '1年間で培った判断力を大舞台で発揮する。', team: '3年生は最後の締めくくり、下級生は次年度主力としての自覚。\n感謝・引き継ぎの姿勢。', level: '1年間を通じた成長の総括。\n次年度に引き継ぐ課題の明文化。' },
+      '共通': { position: '直近の大会や課題に応じて柔軟に組み込む実戦の調整弁。', back: '直近の大会で出た技術課題を試す場。', front: '直近の大会で出た戦術課題を試す場。', team: '実戦の場数を増やし判断力を鍛える。\n対戦相手との交流を通じた礼儀・関係づくり。', level: 'その時点の重点課題の改善度チェック。\n次に控える公式戦のテーマに直結させる。' }
     };
+
+    const initialPractices = {};
+    GROUPS.forEach(g => {
+      initialPractices[g.id] = [
+        { id: Date.now()+1, week: '第1週', theme: '基本フォーム・基本連携の徹底', drill: '手投げ一本打ち、サーブ・レシーブ基礎確認、前後陣の役割整理' },
+        { id: Date.now()+2, week: '第2週', theme: '精度とスピードの両立', drill: 'スマッシュ・ボレー強化、対戦相手を想定した戦術練習' },
+        { id: Date.now()+3, week: '第3週', theme: '実戦耐性の強化・ペア意思統一', drill: '実戦形式練習の比率向上、格上・格下想定のゲーム練習' },
+        { id: Date.now()+4, week: '第4週', theme: 'プレッシャー下での冷静な判断', drill: 'タイブレーク想定練習、チームの勝ちパターン確認、応援徹底' }
+      ];
+    });
+
+    const initialReflections = {};
+    GROUPS.forEach(g => { initialReflections[g.id] = { completed: false, good: '', bad: '', nextAction: '' }; });
 
     const generateYearData = () => {
       const data = {};
       GENDERS.forEach(gender => {
-        data[gender] = generateEmptyData();
-        // 初期サンプル投入
-        data[gender].tournaments = [
-          { id: 'A', month: '4月', date: '未定', name: `${gender} 春季大会`, category: '団体・個人', target: '新チーム始動評価' }
-        ];
+        data[gender] = {
+          // 男子・女子ごとに大会名を微調整した初期データをセット
+          tournaments: initialTournaments.map(t => ({...t, name: t.name.includes('大会') ? `${gender} ${t.name}` : t.name})),
+          plans: JSON.parse(JSON.stringify(initialPlans)),
+          practices: JSON.parse(JSON.stringify(initialPractices)),
+          reflections: JSON.parse(JSON.stringify(initialReflections))
+        };
       });
       return data;
     };
@@ -89,22 +133,27 @@
       "西ノ京中学校": { "2026": generateYearData() }
     };
 
+    // ================= メインコンポーネント =================
     const App = () => {
       const [globalStore, setGlobalStore] = useState(null);
       const [isLoading, setIsLoading] = useState(true);
       
-      const [currentTeam, setCurrentTeam] = useState(() => localStorage.getItem('kst_v4_team') || "西ノ京中学校");
-      const [currentYear, setCurrentYear] = useState(() => localStorage.getItem('kst_v4_year') || "2026");
-      const [currentGender, setCurrentGender] = useState(() => localStorage.getItem('kst_v4_gender') || "男子");
+      const [currentTeam, setCurrentTeam] = useState(() => localStorage.getItem('kst_v5_team') || "西ノ京中学校");
+      const [currentYear, setCurrentYear] = useState(() => localStorage.getItem('kst_v5_year') || "2026");
+      const [currentGender, setCurrentGender] = useState(() => localStorage.getItem('kst_v5_gender') || "男子");
       
       const [activeTab, setActiveTab] = useState('dashboard');
-      const [selectedGroup, setSelectedGroup] = useState('A');
+      // 年度途中から始めるための「現在進行中のグループ」
+      const [activeGroup, setActiveGroup] = useState(() => localStorage.getItem('kst_v5_activeGroup') || "A");
+      // 各タブでの編集用グループ
+      const [selectedGroup, setSelectedGroup] = useState("A");
+      
       const [showSaveMessage, setShowSaveMessage] = useState(false);
       const [history, setHistory] = useState([]);
 
-      // ================= データの読み込み =================
+      // 読み込み処理
       useEffect(() => {
-        db.collection('appData').doc('mainStore_v4').get().then((doc) => {
+        db.collection('appData').doc('mainStore_v5').get().then((doc) => {
           if (doc.exists && doc.data().store) {
             setGlobalStore(doc.data().store);
           } else {
@@ -118,36 +167,35 @@
         });
       }, []);
 
-      // ================= 自動保存 =================
+      // 自動保存処理
       useEffect(() => {
         if (isLoading || !globalStore) return;
-        localStorage.setItem('kst_v4_team', currentTeam);
-        localStorage.setItem('kst_v4_year', currentYear);
-        localStorage.setItem('kst_v4_gender', currentGender);
+        localStorage.setItem('kst_v5_team', currentTeam);
+        localStorage.setItem('kst_v5_year', currentYear);
+        localStorage.setItem('kst_v5_gender', currentGender);
+        localStorage.setItem('kst_v5_activeGroup', activeGroup);
+        
+        // selectedGroupを「現在のフェーズ」に自動追従させる
+        setSelectedGroup(activeGroup);
 
         const timer = setTimeout(() => {
-          db.collection('appData').doc('mainStore_v4').set({ store: globalStore })
-            .then(() => {
-              setShowSaveMessage(true);
-              setTimeout(() => setShowSaveMessage(false), 1500);
-            }).catch(console.error);
+          db.collection('appData').doc('mainStore_v5').set({ store: globalStore })
+            .then(() => { setShowSaveMessage(true); setTimeout(() => setShowSaveMessage(false), 1500); })
+            .catch(console.error);
         }, 1500);
         return () => clearTimeout(timer);
-      }, [globalStore, isLoading, currentTeam, currentYear, currentGender]);
+      }, [globalStore, isLoading, currentTeam, currentYear, currentGender, activeGroup]);
 
       if (isLoading) {
         return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white"><div className="loader mb-4"></div><p className="font-bold">同期中...</p></div>;
       }
 
-      // --- 安全なデータ参照 (チーム > 年度 > 男女) ---
+      // データ参照ツリーの安全確保
       const teamData = globalStore[currentTeam] || { "2026": generateYearData() };
       const availableYears = Object.keys(teamData).sort();
       const actualYear = availableYears.includes(currentYear) ? currentYear : availableYears[0];
-      
-      // 年度データの中に男女の構造がない（旧データ）場合のパッチ処理
       let yearData = teamData[actualYear];
       if (!yearData["男子"]) yearData = generateYearData(); 
-      
       const currentData = yearData[currentGender];
 
       // ================= アクション関数 =================
@@ -156,14 +204,7 @@
         setGlobalStore(prev => {
           const newData = updater(prev[currentTeam][actualYear][currentGender]);
           return {
-            ...prev,
-            [currentTeam]: {
-              ...prev[currentTeam],
-              [actualYear]: {
-                ...prev[currentTeam][actualYear],
-                [currentGender]: newData
-              }
-            }
+            ...prev, [currentTeam]: { ...prev[currentTeam], [actualYear]: { ...prev[currentTeam][actualYear], [currentGender]: newData } }
           };
         });
       };
@@ -185,10 +226,9 @@
 
       const handleAddYear = () => {
         const nextYear = String(Number(actualYear) + 1);
-        if (window.confirm(`${nextYear}年度を作成しますか？`)) {
+        if (window.confirm(`${nextYear}年度を作成し、ノウハウを引き継ぎますか？`)) {
           setHistory(prev => [...prev, globalStore]);
           const newData = generateYearData();
-          // ノウハウだけ引き継ぐ処理
           GENDERS.forEach(gen => {
             newData[gen].plans = teamData[actualYear][gen].plans;
             newData[gen].practices = teamData[actualYear][gen].practices;
@@ -198,86 +238,75 @@
         }
       };
 
-      const handleExport = () => {
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(globalStore));
-        const a = document.createElement('a');
-        a.setAttribute("href", dataStr);
-        a.setAttribute("download", `kst_backup_${new Date().toISOString().slice(0,10)}.json`);
-        document.body.appendChild(a); a.click(); a.remove();
-      };
-
-      const handlePrint = () => { window.print(); };
-
-      // ================= 各種更新 =================
+      // === データ更新 ===
       const updateTournament = (idx, field, value) => updateStore(d => { const arr = [...d.tournaments]; arr[idx][field] = value; return {...d, tournaments: arr}; });
       const addTournament = () => updateStore(d => ({...d, tournaments: [...d.tournaments, {id: selectedGroup, month:'未定', date:'未定', name:'新規大会', category:'', target:''}]}));
       const deleteTournament = (idx) => { if(window.confirm('削除しますか？')) updateStore(d => ({...d, tournaments: d.tournaments.filter((_, i) => i !== idx)})); };
-      
       const updatePlan = (field, value) => updateStore(d => ({...d, plans: {...d.plans, [selectedGroup]: {...d.plans[selectedGroup], [field]: value}}}));
-      
       const updatePractice = (idx, field, value) => updateStore(d => { const arr = [...d.practices[selectedGroup]]; arr[idx][field] = value; return {...d, practices: {...d.practices, [selectedGroup]: arr}}; });
       const addPractice = () => updateStore(d => { const arr = d.practices[selectedGroup] || []; return {...d, practices: {...d.practices, [selectedGroup]: [...arr, {id: Date.now(), week:`第${arr.length+1}週`, theme:'', drill:''}]}}; });
       const deletePractice = (idx) => { if(window.confirm('削除しますか？')) updateStore(d => ({...d, practices: {...d.practices, [selectedGroup]: d.practices[selectedGroup].filter((_, i) => i !== idx)}})); };
-      
       const updateReflection = (field, value) => updateStore(d => ({...d, reflections: {...d.reflections, [selectedGroup]: {...d.reflections[selectedGroup], [field]: value}}}));
 
-      // ダッシュボード用集計
+      // --- テーマカラー動的生成 ---
+      const themeConfig = {
+        '男子': { bg: 'bg-blue-600', hover: 'hover:bg-blue-500', text: 'text-blue-500', border: 'border-blue-500', dashBg: 'from-blue-600 to-blue-800' },
+        '女子': { bg: 'bg-pink-500', hover: 'hover:bg-pink-400', text: 'text-pink-500', border: 'border-pink-500', dashBg: 'from-pink-500 to-pink-700' },
+        '共通': { bg: 'bg-emerald-600', hover: 'hover:bg-emerald-500', text: 'text-emerald-500', border: 'border-emerald-500', dashBg: 'from-emerald-600 to-teal-800' }
+      };
+      const theme = themeConfig[currentGender];
       const completedRefs = Object.values(currentData.reflections).filter(r => r.completed).length;
 
       return (
         <div className="min-h-screen bg-gray-100 flex flex-col">
           
-          {/* ================= ヘッダー (印刷時は非表示) ================= */}
-          <div className="fixed top-0 left-0 right-0 z-50 bg-slate-900 text-white shadow-xl border-b-4 border-emerald-500 no-print">
+          {/* ================= ヘッダー ================= */}
+          <div className={`fixed top-0 left-0 right-0 z-50 bg-slate-900 text-white shadow-xl border-b-4 ${theme.border} no-print transition-colors duration-300`}>
             
-            {/* 上段：タイトルとコントロール */}
             <div className="max-w-7xl mx-auto px-4 pt-4 pb-3 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
               <div>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="bg-emerald-500 text-white text-[10px] font-black px-2 py-0.5 rounded uppercase">Cloud Sync <i className="fas fa-cloud ml-1"></i></span>
-                  <span className={`text-[10px] text-emerald-400 font-bold transition-opacity duration-300 ${showSaveMessage ? 'opacity-100' : 'opacity-0'}`}><i className="fas fa-check mr-1"></i>保存完了</span>
+                  <span className={`${theme.bg} text-white text-[10px] font-black px-2 py-0.5 rounded uppercase transition-colors`}>KST SYSTEM</span>
+                  <span className={`text-[10px] ${theme.text} font-bold transition-opacity duration-300 ${showSaveMessage ? 'opacity-100' : 'opacity-0'}`}><i className="fas fa-check mr-1"></i>保存完了</span>
                 </div>
-                <h1 className="text-xl md:text-2xl font-black text-white tracking-tight">年間育成管理システム</h1>
+                <h1 className="text-xl md:text-2xl font-black text-white tracking-tight">大会逆算型 年間育成管理システム</h1>
               </div>
               
               <div className="flex flex-wrap items-center gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700 w-full lg:w-auto">
                 <button onClick={handleUndo} disabled={history.length === 0} className={`text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1 border ${history.length === 0 ? 'bg-slate-700 text-slate-500 border-slate-600' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-500'}`}><i className="fas fa-undo-alt"></i></button>
-                <button onClick={handlePrint} className="bg-slate-700 hover:bg-slate-600 text-white border border-slate-500 text-xs font-bold px-3 py-1.5 rounded" title="印刷"><i className="fas fa-print"></i></button>
+                <button onClick={() => window.print()} className="bg-slate-700 hover:bg-slate-600 text-white border border-slate-500 text-xs font-bold px-3 py-1.5 rounded" title="印刷"><i className="fas fa-print"></i></button>
                 <div className="h-6 w-px bg-slate-600 mx-1"></div>
                 <select className="bg-slate-900 text-white border border-slate-600 font-bold text-sm p-1.5 rounded max-w-[120px] truncate" value={currentTeam} onChange={(e) => setCurrentTeam(e.target.value)}>
                   {Object.keys(globalStore).map(team => <option key={team} value={team}>{team}</option>)}
                 </select>
                 <button onClick={handleAddTeam} className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-2 py-1.5 rounded text-xs border border-slate-500"><i className="fas fa-plus"></i></button>
                 <div className="flex items-center gap-1 ml-auto lg:ml-2">
-                  <select className="bg-slate-900 text-emerald-400 border border-slate-600 font-bold text-sm p-1.5 rounded" value={actualYear} onChange={(e) => setCurrentYear(e.target.value)}>
+                  <select className={`bg-slate-900 ${theme.text} border border-slate-600 font-bold text-sm p-1.5 rounded`} value={actualYear} onChange={(e) => setCurrentYear(e.target.value)}>
                     {availableYears.map(y => <option key={y} value={y}>{y}年度</option>)}
                   </select>
-                  <button onClick={handleAddYear} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2 py-1.5 rounded text-xs"><i className="fas fa-angle-double-right"></i></button>
+                  <button onClick={handleAddYear} className={`${theme.bg} ${theme.hover} text-white font-bold px-2 py-1.5 rounded text-xs`}><i className="fas fa-angle-double-right"></i></button>
                 </div>
               </div>
             </div>
 
-            {/* 下段：男女切り替え ＆ タブナビゲーション */}
             <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row border-t border-slate-800 bg-slate-900">
               
-              {/* 【NEW】 男女トグル */}
+              {/* 男女トグル */}
               <div className="flex items-center gap-1 py-2 md:pr-4 md:border-r border-slate-700">
                 {GENDERS.map(gen => (
-                  <button key={gen} onClick={() => setCurrentGender(gen)} className={`px-4 py-1.5 rounded-full text-xs font-black transition-all border ${currentGender === gen ? 'bg-blue-500 text-white border-blue-400 shadow-md' : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'}`}>
-                    {gen === '男子' && <i className="fas fa-mars mr-1"></i>}
-                    {gen === '女子' && <i className="fas fa-venus mr-1"></i>}
-                    {gen}
+                  <button key={gen} onClick={() => setCurrentGender(gen)} className={`px-4 py-1.5 rounded-full text-xs font-black transition-all border ${currentGender === gen ? (gen === '男子' ? 'bg-blue-600 text-white border-blue-500 shadow-md' : gen === '女子' ? 'bg-pink-500 text-white border-pink-400 shadow-md' : 'bg-emerald-600 text-white border-emerald-500 shadow-md') : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'}`}>
+                    {gen === '男子' && <i className="fas fa-mars mr-1"></i>} {gen === '女子' && <i className="fas fa-venus mr-1"></i>} {gen}
                   </button>
                 ))}
               </div>
 
               {/* メインタブ */}
               <div className="flex overflow-x-auto whitespace-nowrap scrollbar-hide flex-grow">
-                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'dashboard' ? 'border-amber-400 text-amber-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('dashboard')}><i className="fas fa-home mr-1.5"></i>HOME</button>
-                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'calendar' ? 'border-emerald-400 text-emerald-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('calendar')}><i className="fas fa-calendar-alt mr-1.5"></i>カレンダー</button>
-                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'plan' ? 'border-emerald-400 text-emerald-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('plan')}><i className="fas fa-bullseye mr-1.5"></i>育成計画</button>
-                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'practice' ? 'border-blue-400 text-blue-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('practice')}><i className="fas fa-walking mr-1.5"></i>練習メニュー</button>
-                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'reflection' ? 'border-rose-400 text-rose-400 bg-slate-800' : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('reflection')}><i className="fas fa-sync-alt mr-1.5"></i>振り返り</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'dashboard' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('dashboard')}><i className="fas fa-home mr-1.5"></i>HOME</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'calendar' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('calendar')}><i className="fas fa-calendar-alt mr-1.5"></i>カレンダー</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'plan' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('plan')}><i className="fas fa-bullseye mr-1.5"></i>育成計画</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'practice' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('practice')}><i className="fas fa-walking mr-1.5"></i>練習メニュー</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'reflection' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('reflection')}><i className="fas fa-sync-alt mr-1.5"></i>振り返り</button>
               </div>
             </div>
           </div>
@@ -285,17 +314,16 @@
           {/* ================= メインコンテンツ ================= */}
           <main className="flex-grow max-w-7xl w-full mx-auto p-4 pt-52 md:pt-40 pb-12">
             
-            {/* 印刷用ヘッダー（通常時は非表示） */}
             <div className="hidden print-only mb-6 text-center border-b-2 border-gray-800 pb-4">
-              <h1 className="text-2xl font-black">【{currentTeam}】 {actualYear}年度 {currentGender}チーム 年間育成システム</h1>
+              <h1 className="text-2xl font-black">【{currentTeam}】 {actualYear}年度 {currentGender}チーム 育成システム</h1>
             </div>
 
             {/* グループセレクター */}
             {['plan', 'practice', 'reflection'].includes(activeTab) && (
-              <div className="mb-4 bg-white p-3 rounded-lg shadow-sm border border-gray-200 flex flex-col sm:flex-row justify-between items-center gap-3 border-l-4 border-l-emerald-500 no-print">
+              <div className={`mb-4 bg-white p-3 rounded-lg shadow-sm border border-gray-200 flex flex-col sm:flex-row justify-between items-center gap-3 border-l-4 ${theme.border} no-print transition-colors`}>
                 <div className="flex items-center gap-2 w-full sm:w-auto">
                   <span className="text-xs font-black text-gray-600 whitespace-nowrap">編集対象グループ:</span>
-                  <select className="w-full sm:w-auto border border-gray-300 font-bold text-sm p-1.5 rounded bg-gray-50 text-gray-800 focus:ring-2 focus:ring-emerald-400" value={selectedGroup} onChange={(e) => setSelectedGroup(e.target.value)}>
+                  <select className={`w-full sm:w-auto border border-gray-300 font-bold text-sm p-1.5 rounded bg-gray-50 text-gray-800 focus:ring-2`} value={selectedGroup} onChange={(e) => setSelectedGroup(e.target.value)}>
                     {GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </div>
@@ -305,51 +333,47 @@
             {/* ================= TAB 0: ダッシュボード ================= */}
             {activeTab === 'dashboard' && (
               <div className="space-y-6 animate-fade-in">
+                
+                {/* 年度途中からのスタート設定パネル */}
+                <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
+                  <div>
+                    <h2 className="font-black text-gray-800 text-lg flex items-center"><i className={`fas fa-play-circle mr-2 ${theme.text}`}></i>現在の進行フェーズ（年度途中スタート）</h2>
+                    <p className="text-xs text-gray-500 mt-1">ここを設定すると、他のタブを開いた時に自動的にそのグループから開始されます。</p>
+                  </div>
+                  <select className={`border-2 ${theme.border} ${theme.text} font-black text-lg p-2 rounded-lg bg-gray-50`} value={activeGroup} onChange={(e) => setActiveGroup(e.target.value)}>
+                    {GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                </div>
+
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  
-                  {/* ステータスカード */}
-                  <div className="bg-gradient-to-br from-blue-600 to-blue-800 rounded-xl p-5 text-white shadow-md">
-                    <div className="text-blue-200 text-xs font-bold mb-1">現在のコンテキスト</div>
-                    <div className="text-2xl font-black mb-4">{currentTeam} <br/><span className="text-lg text-blue-300">{actualYear}年度 ({currentGender})</span></div>
-                    <div className="flex items-center justify-between border-t border-blue-500/50 pt-3">
-                      <span className="text-xs font-bold">登録大会数</span>
-                      <span className="text-xl font-bold">{currentData.tournaments.length}</span>
+                  <div className={`bg-gradient-to-br ${theme.dashBg} rounded-xl p-5 text-white shadow-md transition-colors`}>
+                    <div className="text-white/70 text-xs font-bold mb-1">コンテキストサマリー</div>
+                    <div className="text-2xl font-black mb-4">{currentTeam} <br/><span className="text-lg opacity-90">{actualYear}年度 ({currentGender})</span></div>
+                    <div className="flex items-center justify-between border-t border-white/20 pt-3">
+                      <span className="text-xs font-bold">登録大会数</span><span className="text-xl font-bold">{currentData.tournaments.length}</span>
                     </div>
                   </div>
 
                   <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
                     <div className="text-gray-500 text-xs font-bold mb-3 flex items-center"><i className="fas fa-tasks mr-2 text-rose-500"></i>振り返り進捗 (PDCA)</div>
                     <div className="flex items-end gap-2 mb-2">
-                      <span className="text-3xl font-black text-gray-800">{completedRefs}</span>
-                      <span className="text-sm font-bold text-gray-400 mb-1">/ 11 グループ</span>
+                      <span className="text-3xl font-black text-gray-800">{completedRefs}</span><span className="text-sm font-bold text-gray-400 mb-1">/ 11 グループ</span>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-2 mb-1">
-                      <div className="bg-rose-500 h-2 rounded-full" style={{width: `${(completedRefs/11)*100}%`}}></div>
+                      <div className="bg-rose-500 h-2 rounded-full transition-all" style={{width: `${(completedRefs/11)*100}%`}}></div>
                     </div>
-                    <p className="text-[10px] text-gray-400">※大会終了後は必ず「振り返り」タブで評価を完了させてください。</p>
                   </div>
 
-                  <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md flex flex-col justify-center items-center text-center">
-                    <i className="fas fa-database text-3xl text-gray-300 mb-2"></i>
-                    <h3 className="font-bold text-gray-700 text-sm mb-1">データバックアップ</h3>
-                    <p className="text-[10px] text-gray-500 mb-3">現在の全データをJSON形式でPCに保存します。</p>
-                    <button onClick={handleExport} className="bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold px-4 py-2 rounded-lg shadow transition-colors w-full"><i className="fas fa-download mr-1"></i> バックアップをダウンロード</button>
-                  </div>
-
-                </div>
-
-                <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
-                  <h3 className="font-bold text-gray-800 border-b pb-2 mb-4"><i className="fas fa-flag text-emerald-500 mr-2"></i>登録済み 大会スケジュールハイライト</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-                    {currentData.tournaments.slice(0, 6).map((t, i) => (
-                      <div key={i} className="border border-gray-100 bg-gray-50 rounded-lg p-3">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-xs font-black text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded">{t.month}</span>
-                          <span className="text-[10px] font-bold text-gray-400">{t.date}</span>
+                  <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
+                    <h3 className="font-bold text-gray-800 border-b pb-2 mb-3 text-sm"><i className={`fas fa-flag ${theme.text} mr-2`}>直近の大会ハイライト</i></h3>
+                    <div className="space-y-2">
+                      {currentData.tournaments.slice(0, 3).map((t, i) => (
+                        <div key={i} className="flex justify-between items-center text-xs">
+                          <span className={`font-black ${theme.text} bg-gray-50 px-2 py-0.5 rounded border border-gray-100`}>{t.month}</span>
+                          <span className="font-bold text-gray-700 truncate flex-grow ml-2">{t.name}</span>
                         </div>
-                        <div className="font-bold text-sm text-gray-800 truncate" title={t.name}>{t.name}</div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -361,27 +385,21 @@
                 <div className="flex justify-between items-center border-b pb-3 border-gray-100 no-print">
                   <h2 className="text-lg font-bold text-gray-800">大会スケジュール（{currentGender}）</h2>
                   <div className="flex gap-2">
-                    <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>
-                      {GROUPS.map(g => <option key={g.id} value={g.id}>追加先: {g.id}</option>)}
-                    </select>
-                    <button onClick={addTournament} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded"><i className="fas fa-plus mr-1"></i>大会追加</button>
+                    <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>{GROUPS.map(g => <option key={g.id} value={g.id}>追加先: {g.id}</option>)}</select>
+                    <button onClick={addTournament} className={`${theme.bg} ${theme.hover} text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-plus mr-1"></i>大会追加</button>
                   </div>
                 </div>
                 <div className="overflow-x-auto print-break-inside-avoid">
                   <table className="w-full text-left border-collapse min-w-[900px]">
                     <thead>
                       <tr className="bg-gray-50 text-gray-600 text-xs font-bold border-b">
-                        <th className="p-2 w-16 text-center">Grp</th>
-                        <th className="p-2 w-20">開催月</th>
-                        <th className="p-2 w-28 text-center">日程</th>
-                        <th className="p-2 w-72">大会名 / カテゴリ</th>
-                        <th className="p-2">位置付け</th>
-                        <th className="p-2 w-10 text-center no-print">操作</th>
+                        <th className="p-2 w-16 text-center">Grp</th><th className="p-2 w-20">開催月</th><th className="p-2 w-28 text-center">日程</th>
+                        <th className="p-2 w-72">大会名 / カテゴリ</th><th className="p-2">位置付け</th><th className="p-2 w-10 text-center no-print">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 text-xs">
                       {currentData.tournaments.map((t, idx) => (
-                        <tr key={idx} className="hover:bg-emerald-50/30">
+                        <tr key={idx} className="hover:bg-gray-50 transition-colors">
                           <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-transparent w-full" value={t.id} onChange={(e) => updateTournament(idx, 'id', e.target.value)}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
                           <td className="p-2"><input type="text" className="border rounded p-1 w-full font-bold text-center bg-transparent" value={t.month} onChange={(e) => updateTournament(idx, 'month', e.target.value)}/></td>
                           <td className="p-2"><input type="text" className="border rounded p-1 w-full font-mono text-center font-bold bg-transparent" value={t.date} onChange={(e) => updateTournament(idx, 'date', e.target.value)}/></td>
@@ -389,7 +407,7 @@
                             <input type="text" className="border rounded p-1 w-full font-bold bg-transparent" value={t.name} onChange={(e) => updateTournament(idx, 'name', e.target.value)}/>
                             <input type="text" className="border-none p-0.5 w-full text-[10px] text-gray-500 bg-transparent" value={t.category} onChange={(e) => updateTournament(idx, 'category', e.target.value)} placeholder="カテゴリ"/>
                           </td>
-                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none bg-transparent" value={t.target} onChange={(e) => updateTournament(idx, 'target', e.target.value)}/></td>
+                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none bg-transparent leading-relaxed" value={t.target} onChange={(e) => updateTournament(idx, 'target', e.target.value)}/></td>
                           <td className="p-2 text-center no-print"><button onClick={() => deleteTournament(idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button></td>
                         </tr>
                       ))}
@@ -402,15 +420,15 @@
             {/* ================= TAB ②: 育成計画 ================= */}
             {activeTab === 'plan' && currentData.plans[selectedGroup] && (
               <div className="space-y-4 animate-fade-in print-break-inside-avoid">
-                <div className="bg-white border-t-4 border-emerald-500 p-4 rounded-xl shadow-sm">
+                <div className={`bg-white border-t-4 ${theme.border} p-4 rounded-xl shadow-sm transition-colors`}>
                   <label className="text-[10px] text-gray-500 font-bold block mb-1 uppercase tracking-wider">フェーズの位置付け・狙い ({currentGender})</label>
-                  <textarea className="w-full bg-gray-50 border border-gray-200 rounded p-2 text-xs font-bold text-gray-800 leading-relaxed h-12 bg-transparent" value={currentData.plans[selectedGroup].position} onChange={(e)=>updatePlan('position', e.target.value)}/>
+                  <textarea className="w-full bg-gray-50 border border-gray-200 rounded p-2 text-xs font-bold text-gray-800 leading-relaxed h-14 bg-transparent" value={currentData.plans[selectedGroup].position} onChange={(e)=>updatePlan('position', e.target.value)}/>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-blue-800 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-1"><i className="fas fa-baseball-ball text-blue-500"></i> 後衛: 技術・配球</div><textarea className="w-full h-40 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].back} onChange={(e)=>updatePlan('back', e.target.value)}/></div>
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-red-800 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-1"><i className="fas fa-user-shield text-red-500"></i> 前衛: 技術・動き</div><textarea className="w-full h-40 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].front} onChange={(e)=>updatePlan('front', e.target.value)}/></div>
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-purple-800 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-1"><i className="fas fa-users text-purple-500"></i> チーム: 規律・マナー</div><textarea className="w-full h-40 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].team} onChange={(e)=>updatePlan('team', e.target.value)}/></div>
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-amber-800 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-1"><i className="fas fa-layer-group text-amber-500"></i> 学年別・習熟度別配慮</div><textarea className="w-full h-40 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].level} onChange={(e)=>updatePlan('level', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-baseball-ball ${theme.text}`}></i> 後衛: 技術・配球</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].back} onChange={(e)=>updatePlan('back', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-user-shield ${theme.text}`}></i> 前衛: 技術・動き</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].front} onChange={(e)=>updatePlan('front', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-users ${theme.text}`}></i> チーム: 規律・マナー</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].team} onChange={(e)=>updatePlan('team', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-layer-group ${theme.text}`}></i> 学年別・習熟度別配慮</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].level} onChange={(e)=>updatePlan('level', e.target.value)}/></div>
                 </div>
               </div>
             )}
@@ -419,7 +437,7 @@
             {activeTab === 'practice' && currentData.practices[selectedGroup] && (
               <div className="space-y-4 animate-fade-in print-break-inside-avoid">
                 <div className="flex justify-end mb-2 no-print">
-                  <button onClick={addPractice} className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-2 rounded shadow transition-all"><i className="fas fa-plus mr-1"></i>練習枠を追加</button>
+                  <button onClick={addPractice} className={`${theme.bg} ${theme.hover} text-white font-bold text-xs px-3 py-2 rounded shadow transition-all`}><i className="fas fa-plus mr-1"></i>練習枠を追加</button>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   {currentData.practices[selectedGroup].map((p, idx) => (
@@ -429,7 +447,7 @@
                         <button onClick={() => deletePractice(idx)} className="text-gray-400 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity no-print"><i className="fas fa-times"></i></button>
                       </div>
                       <div className="p-3 flex-grow space-y-3 text-xs">
-                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">週間重点テーマ</label><input type="text" className="w-full border border-gray-200 font-bold rounded p-1.5 text-blue-900 bg-gray-50 bg-transparent" value={p.theme} onChange={(e)=>updatePractice(idx, 'theme', e.target.value)}/></div>
+                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">週間重点テーマ</label><input type="text" className={`w-full border border-gray-200 font-bold rounded p-1.5 ${theme.text} bg-gray-50 bg-transparent`} value={p.theme} onChange={(e)=>updatePractice(idx, 'theme', e.target.value)}/></div>
                         <div><label className="text-[10px] font-bold text-gray-400 block mb-1">練習ドリル・配球内容</label><textarea className="w-full border border-gray-200 rounded p-1.5 h-32 text-gray-700 bg-gray-50 resize-none bg-transparent" value={p.drill} onChange={(e)=>updatePractice(idx, 'drill', e.target.value)}/></div>
                       </div>
                     </div>
@@ -442,16 +460,16 @@
             {activeTab === 'reflection' && currentData.reflections[selectedGroup] && (
               <div className="space-y-4 animate-fade-in print-break-inside-avoid">
                 <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
-                  <h2 className="text-sm font-bold text-rose-900"><i className="fas fa-sync-alt mr-1.5"></i>大会後 振り返り ({currentGender})</h2>
+                  <h2 className="text-sm font-bold text-gray-800"><i className={`fas fa-sync-alt mr-1.5 ${theme.text}`}></i>大会後 振り返り ({currentGender})</h2>
                   <label className={`flex items-center space-x-2 text-xs font-bold cursor-pointer border px-3 py-1.5 rounded-lg transition-colors ${currentData.reflections[selectedGroup].completed ? 'bg-rose-50 border-rose-300 text-rose-600' : 'bg-white border-gray-300 text-gray-400'}`}>
                     <input type="checkbox" checked={currentData.reflections[selectedGroup].completed} onChange={(e) => updateReflection('completed', e.target.checked)} className="form-checkbox text-rose-500 rounded w-4 h-4"/>
                     <span>振り返り完了済</span>
                   </label>
                 </div>
                 <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm space-y-4 text-xs">
-                  <div><label className="block text-sm font-bold text-emerald-700 mb-1"><i className="fas fa-thumbs-up"></i> 成果（機能した技術・戦術）</label><textarea value={currentData.reflections[selectedGroup].good} onChange={(e) => updateReflection('good', e.target.value)} className="w-full border-none bg-emerald-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent"></textarea></div>
-                  <div><label className="block text-sm font-bold text-rose-700 mb-1"><i className="fas fa-exclamation-triangle"></i> 課題（修正が必要な点）</label><textarea value={currentData.reflections[selectedGroup].bad} onChange={(e) => updateReflection('bad', e.target.value)} className="w-full border-none bg-rose-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent"></textarea></div>
-                  <div className="pt-2 border-t border-gray-100"><label className="block text-sm font-bold text-blue-700 mb-1"><i className="fas fa-long-arrow-alt-right"></i> 次の練習メニューへの引継ぎ</label><textarea value={currentData.reflections[selectedGroup].nextAction} onChange={(e) => updateReflection('nextAction', e.target.value)} className="w-full border-none bg-blue-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent"></textarea></div>
+                  <div><label className="block text-sm font-bold text-gray-700 mb-1"><i className={`fas fa-thumbs-up ${theme.text}`}></i> 成果（機能した技術・戦術）</label><textarea value={currentData.reflections[selectedGroup].good} onChange={(e) => updateReflection('good', e.target.value)} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-emerald-400"></textarea></div>
+                  <div><label className="block text-sm font-bold text-gray-700 mb-1"><i className="fas fa-exclamation-triangle text-rose-500"></i> 課題（修正が必要な点）</label><textarea value={currentData.reflections[selectedGroup].bad} onChange={(e) => updateReflection('bad', e.target.value)} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-rose-400"></textarea></div>
+                  <div className="pt-2 border-t border-gray-100"><label className="block text-sm font-bold text-gray-700 mb-1"><i className={`fas fa-long-arrow-alt-right ${theme.text}`}></i> 次の練習メニューへの引継ぎ</label><textarea value={currentData.reflections[selectedGroup].nextAction} onChange={(e) => updateReflection('nextAction', e.target.value)} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-blue-400"></textarea></div>
                 </div>
               </div>
             )}
