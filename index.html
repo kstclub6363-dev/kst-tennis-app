@@ -65,7 +65,7 @@
     }
 
     // ================= 定数 =================
-    const GROUPS = [
+    const DEFAULT_GROUPS = [
       { id: 'A', name: 'グループA (4月 春季総体)' }, { id: 'B', name: 'グループB (5月 国スポ選考会)' },
       { id: 'C', name: 'グループC (6月 個人予選・京都C)' }, { id: 'D', name: 'グループD (7月 市・府大会)' },
       { id: 'E', name: 'グループE (8月 近畿・全国等)' }, { id: 'F', name: 'グループF (9-10月 秋季新人)' },
@@ -73,6 +73,33 @@
       { id: 'I', name: 'グループI (1月 冬季強化)' }, { id: 'J', name: 'グループJ (3月 集大成)' },
       { id: '共通', name: 'グループ共通 (随時調整)' }
     ];
+    const GROUPS = DEFAULT_GROUPS;
+
+    const isGroupId = (value) => DEFAULT_GROUPS.some(g => g.id === value);
+    const inferTournamentGroup = (t) => {
+      if (!t) return 'A';
+      if (t.group && isGroupId(t.group)) return t.group;
+      if (t.id && isGroupId(t.id)) return t.id;
+      const month = String(t.month || '');
+      const name = String(t.name || '');
+      if (month.includes('4')) return 'A';
+      if (month.includes('5')) return 'B';
+      if (month.includes('6')) return 'C';
+      if (month.includes('7')) return 'D';
+      if (month.includes('8')) return 'E';
+      if (month.includes('9') || month.includes('10')) return 'F';
+      if (month.includes('11')) return 'G';
+      if (month.includes('12')) return 'H';
+      if (month.includes('1')) return 'I';
+      if (month.includes('3')) return 'J';
+      if (/KST|KSC|不定期|随時/.test(month + name)) return '共通';
+      return 'A';
+    };
+
+    const mergeGroupSettings = (settings) => DEFAULT_GROUPS.map(g => ({
+      ...g,
+      name: (settings && settings[g.id] && settings[g.id].name) ? settings[g.id].name : g.name
+    }));
     // 「男子」「女子」はそれぞれ大会・内容が異なるため完全に別データを持つ。
     // 「共通」はチーム全体で1つだけ持つデータ（男女どちらのタブからも参照される場ではなく、
     //  チーム単位の独立したバケツとして扱う）。
@@ -143,7 +170,7 @@
 
     const buildInitialPlansWithComments = () => {
       const p = JSON.parse(JSON.stringify(initialPlans));
-      GROUPS.forEach(g => { p[g].comments = []; });
+      GROUPS.forEach(g => { p[g.id].comments = []; });
       return p;
     };
 
@@ -152,6 +179,7 @@
       activeGroup: 'A', // このチーム・このバケツの「現在の進行フェーズ」（チーム/男女ごとに独立して保持する）
       tournaments: initialTournaments.map(t => ({
         ...t,
+        group: t.id, // A〜J/共通の所属グループ。idとは分けて保持する
         id: uid('t'),
         result: '', // 大会結果（順位・戦績・メモ）
         name: (labelPrefix && t.name.includes('大会')) ? `${labelPrefix} ${t.name}` : t.name
@@ -160,14 +188,15 @@
       practices: buildInitialPractices(),
       reflections: buildInitialReflections(),
       roster: [], // 選手名簿
-      sessions: [] // 出欠記録（練習日ごとの出席チェック）
+      sessions: [], // 出欠記録（練習日ごとの出席チェック）
+      reviewFlags: {} // グループごとの「育成計画が変わったので見直してね」フラグ {[groupId]: {practice:bool, reflection:bool}}
     });
 
     // 以前のバージョンで作られたデータには roster/sessions/result/comments が無いことがあるため、
     // 読み込み時に不足分を安全に補完する（データ移行なしで新機能を使えるようにするため）
     const normalizeBucketData = (data) => {
       if (!data) return data;
-      const tournaments = (data.tournaments || []).map(t => ({ result: '', ...t }));
+      const tournaments = (data.tournaments || []).map(t => ({ result: '', ...t, group: inferTournamentGroup(t), id: (t.id && !isGroupId(t.id)) ? t.id : uid('t') }));
       const plans = {};
       GROUPS.forEach(g => {
         const p = (data.plans && data.plans[g.id]) || initialPlans[g.id] || {};
@@ -185,7 +214,8 @@
         practices: data.practices || buildInitialPractices(),
         reflections,
         roster: data.roster || [],
-        sessions: data.sessions || []
+        sessions: data.sessions || [],
+        reviewFlags: data.reviewFlags || {}
       };
     };
 
@@ -303,6 +333,8 @@
 
     const AdminPage = ({ profile, onBack }) => {
       const [users, setUsers] = useState(null);
+      const [groupSettings, setGroupSettings] = useState({});
+      const adminGroups = mergeGroupSettings(groupSettings);
       const [teams, setTeams] = useState([]);
       const [teamsLoading, setTeamsLoading] = useState(true);
 
@@ -329,6 +361,20 @@
         });
         return unsub;
       }, []);
+
+      useEffect(() => {
+        const unsub = db.collection('appSettings').doc('ui').onSnapshot(doc => {
+          setGroupSettings((doc.exists && doc.data().groups) ? doc.data().groups : {});
+        });
+        return unsub;
+      }, []);
+
+      const updateGroupName = (groupId, name) => {
+        db.collection('appSettings').doc('ui').set({
+          groups: { [groupId]: { name: name || DEFAULT_GROUPS.find(g => g.id === groupId).name } }
+        }, { merge: true });
+      };
+
 
       useEffect(() => {
         const unsub = db.collection('teams').onSnapshot(snap => {
@@ -454,6 +500,26 @@
           </div>
 
           <div className="max-w-5xl mx-auto p-4 space-y-6">
+
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="font-black text-gray-800 text-sm"><i className="fas fa-layer-group text-purple-500 mr-1.5"></i>グループ設定</h2>
+                <span className="text-[10px] text-gray-400 font-bold">表示名のみ変更できます（A〜J/共通の内部IDは固定）</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {adminGroups.map(g => (
+                  <div key={g.id} className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg p-2">
+                    <span className="w-10 h-8 flex items-center justify-center rounded bg-slate-800 text-white text-xs font-black">{g.id}</span>
+                    <input
+                      value={g.name}
+                      onChange={(e) => updateGroupName(g.id, e.target.value)}
+                      className="flex-grow border border-gray-300 rounded p-2 text-xs font-bold bg-white"
+                    />
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] text-gray-400 mt-2">※ここで変更したグループ名は、ダッシュボード・計画・練習・振り返り・大会スケジュールの選択肢に反映されます。</p>
+            </div>
 
             {/* ---- チーム管理 ---- */}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
@@ -632,6 +698,8 @@
 
     const TrainingApp = ({ profile, onGoAdmin, onLogout }) => {
       const [globalStore, setGlobalStore] = useState(null);
+      const [groupSettings, setGroupSettings] = useState({});
+      const groupList = mergeGroupSettings(groupSettings);
       const [isLoading, setIsLoading] = useState(true);
 
       const [currentTeam, setCurrentTeam] = useState(() => localStorage.getItem('kst_v6_team') || "西ノ京中学校");
@@ -683,6 +751,13 @@
           setLastMeta(meta);
           setIsLoading(false);
         }, err => { console.error('購読エラー', err); setIsLoading(false); });
+        return unsub;
+      }, []);
+
+      useEffect(() => {
+        const unsub = db.collection('appSettings').doc('ui').onSnapshot(doc => {
+          setGroupSettings((doc.exists && doc.data().groups) ? doc.data().groups : {});
+        });
         return unsub;
       }, []);
 
@@ -776,11 +851,18 @@
           }).catch(() => {});
 
           // 保護者向け公開カレンダー: 大会情報（結果含む）だけを別コレクションにミラーする
-          if (changedBucketData) {
+          // ※ set()のドット付きキーはネストしたフィールドとして解釈されない場合があるため、
+          //   男子・女子・共通の3バケツ分をまとめて通常のネストしたオブジェクトとして書き込む
+          if (years && years[actualYear]) {
+            const yearBuckets = years[actualYear];
+            const tournamentsByBucket = {};
+            BUCKETS.forEach(b => {
+              tournamentsByBucket[b] = ((yearBuckets[b] && yearBuckets[b].tournaments) || []).map(t => ({
+                group: inferTournamentGroup(t), month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || ''
+              }));
+            });
             db.collection('publicCalendars').doc(teamName).set({
-              [`tournaments.${currentBucket}`]: (changedBucketData.tournaments || []).map(t => ({
-                month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || ''
-              })),
+              tournaments: tournamentsByBucket,
               teamName,
               updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             }, { merge: true }).catch(() => {});
@@ -834,9 +916,15 @@
 
       // === データ更新 ===
       const updateTournament = (idx, field, value) => updateStore(d => { const arr = [...d.tournaments]; arr[idx][field] = value; return {...d, tournaments: arr}; });
-      const addTournament = () => updateStore(d => ({...d, tournaments: [...d.tournaments, {id: selectedGroup, month:'未定', date:'未定', name:'新規大会', category:'', target:''}]}));
+      const addTournament = () => updateStore(d => ({...d, tournaments: [...d.tournaments, {id: uid('t'), group: selectedGroup, month:'未定', date:'未定', name:'新規大会', category:'', target:'', result:''}]}));
       const deleteTournament = (idx) => { if(window.confirm('削除しますか？')) updateStore(d => ({...d, tournaments: d.tournaments.filter((_, i) => i !== idx)})); };
-      const updatePlan = (field, value) => updateStore(d => ({...d, plans: {...d.plans, [selectedGroup]: {...d.plans[selectedGroup], [field]: value}}}));
+      const updatePlan = (field, value) => updateStore(d => ({
+        ...d,
+        plans: {...d.plans, [selectedGroup]: {...d.plans[selectedGroup], [field]: value}},
+        // 育成計画を変更したら「練習メニュー」「振り返り」に見直しフラグを立てる（自動で内容は書き換えず、確認を促すだけ）
+        reviewFlags: {...d.reviewFlags, [selectedGroup]: { practice: true, reflection: true }}
+      }));
+      const clearReviewFlag = (group, kind) => updateStore(d => ({...d, reviewFlags: {...d.reviewFlags, [group]: {...(d.reviewFlags[group]||{}), [kind]: false}}}));
       const updatePractice = (idx, field, value) => updateStore(d => { const arr = [...d.practices[selectedGroup]]; arr[idx][field] = value; return {...d, practices: {...d.practices, [selectedGroup]: arr}}; });
       const addPractice = () => updateStore(d => { const arr = d.practices[selectedGroup] || []; return {...d, practices: {...d.practices, [selectedGroup]: [...arr, {id: uid('pr'), week:`第${arr.length+1}週`, theme:'', drill:''}]}}; });
       const deletePractice = (idx) => { if(window.confirm('削除しますか？')) updateStore(d => ({...d, practices: {...d.practices, [selectedGroup]: d.practices[selectedGroup].filter((_, i) => i !== idx)}})); };
@@ -891,6 +979,8 @@
       };
       const theme = themeConfig[currentBucket];
       const completedRefs = Object.values(currentData.reflections).filter(r => r.completed).length;
+      const anyPracticeReview = Object.values(currentData.reviewFlags || {}).some(f => f && f.practice);
+      const anyReflectionReview = Object.values(currentData.reviewFlags || {}).some(f => f && f.reflection);
       const meta = lastMeta[currentTeam];
       const metaTime = meta && meta.updatedAt && meta.updatedAt.toDate ? meta.updatedAt.toDate().toLocaleString('ja-JP') : '';
 
@@ -948,8 +1038,8 @@
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'dashboard' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('dashboard')}><i className="fas fa-home mr-1.5"></i>HOME</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'calendar' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('calendar')}><i className="fas fa-calendar-alt mr-1.5"></i>カレンダー</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'plan' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('plan')}><i className="fas fa-bullseye mr-1.5"></i>育成計画</button>
-                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'practice' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('practice')}><i className="fas fa-walking mr-1.5"></i>練習メニュー</button>
-                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'reflection' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('reflection')}><i className="fas fa-sync-alt mr-1.5"></i>振り返り</button>
+                <button className={`relative py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'practice' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('practice')}><i className="fas fa-walking mr-1.5"></i>練習メニュー{anyPracticeReview && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400"></span>}</button>
+                <button className={`relative py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'reflection' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('reflection')}><i className="fas fa-sync-alt mr-1.5"></i>振り返り{anyReflectionReview && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400"></span>}</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'roster' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('roster')}><i className="fas fa-id-card mr-1.5"></i>名簿・出欠</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'history' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('history')}><i className="fas fa-history mr-1.5"></i>更新履歴</button>
               </div>
@@ -967,7 +1057,7 @@
                 <div className="flex items-center gap-2 w-full sm:w-auto">
                   <span className="text-xs font-black text-gray-600 whitespace-nowrap">編集対象グループ:</span>
                   <select className={`w-full sm:w-auto border border-gray-300 font-bold text-sm p-1.5 rounded bg-gray-50 text-gray-800 focus:ring-2`} value={selectedGroup} onChange={(e) => setSelectedGroup(e.target.value)}>
-                    {GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                    {groupList.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </div>
               </div>
@@ -982,7 +1072,7 @@
                     <p className="text-xs text-gray-500 mt-1">ここを設定すると、他のタブを開いた時に自動的にそのグループから開始されます。</p>
                   </div>
                   <select disabled={isViewer} className={`border-2 ${theme.border} ${theme.text} font-black text-lg p-2 rounded-lg bg-gray-50 disabled:opacity-60`} value={currentData.activeGroup || 'A'} onChange={(e) => updateActiveGroup(e.target.value)}>
-                    {GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                    {groupList.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </div>
 
@@ -1022,7 +1112,7 @@
                   <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
                     <h3 className="font-bold text-gray-800 border-b pb-2 mb-3 text-sm"><i className="fas fa-layer-group text-gray-400 mr-2"></i>グループ別 振り返り進捗</h3>
                     <div className="space-y-1.5">
-                      {GROUPS.map(g => {
+                      {groupList.map(g => {
                         const done = currentData.reflections[g.id] && currentData.reflections[g.id].completed;
                         return (
                           <div key={g.id} className="flex items-center gap-2 text-[11px]">
@@ -1073,7 +1163,7 @@
                 <div className="flex justify-between items-center border-b pb-3 border-gray-100 no-print">
                   <h2 className="text-lg font-bold text-gray-800">大会スケジュール（{currentBucket === '共通' ? 'チーム共通' : currentBucket}）</h2>
                   <div className="flex gap-2">
-                    <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>{GROUPS.map(g => <option key={g.id} value={g.id}>追加先: {g.id}</option>)}</select>
+                    <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>{groupList.map(g => <option key={g.id} value={g.id}>追加先: {g.name}</option>)}</select>
                     <button onClick={addTournament} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-plus mr-1"></i>大会追加</button>
                     <button onClick={exportTournamentsCsv} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors"><i className="fas fa-file-csv mr-1"></i>CSV書き出し</button>
                   </div>
@@ -1089,7 +1179,7 @@
                     <tbody className="divide-y divide-gray-100 text-xs">
                       {currentData.tournaments.map((t, idx) => (
                         <tr key={t.id || idx} className="hover:bg-gray-50 transition-colors">
-                          <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-transparent w-full" value={t.id} onChange={(e) => updateTournament(idx, 'id', e.target.value)} disabled={isViewer}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
+                          <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-transparent w-full" value={inferTournamentGroup(t)} onChange={(e) => updateTournament(idx, 'group', e.target.value)} disabled={isViewer}>{groupList.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
                           <td className="p-2"><input type="text" className="border rounded p-1 w-full font-bold text-center bg-transparent" value={t.month} onChange={(e) => updateTournament(idx, 'month', e.target.value)} readOnly={isViewer}/></td>
                           <td className="p-2"><input type="text" className="border rounded p-1 w-full font-mono text-center font-bold bg-transparent" value={t.date} onChange={(e) => updateTournament(idx, 'date', e.target.value)} readOnly={isViewer}/></td>
                           <td className="p-2 space-y-1">
@@ -1110,6 +1200,7 @@
 
             {activeTab === 'plan' && currentData.plans[selectedGroup] && (
               <div className="space-y-4 fade-in print-break-inside-avoid">
+                <p className="text-[11px] text-gray-400 no-print"><i className="fas fa-info-circle mr-1"></i>ここを変更すると「練習メニュー」「振り返り」タブに見直しマークが自動でつきます（内容は自動で書き換わりません）。</p>
                 <div className={`bg-white border-t-4 ${theme.border} p-4 rounded-xl shadow-sm transition-colors`}>
                   <label className="text-[10px] text-gray-500 font-bold block mb-1 uppercase tracking-wider">フェーズの位置付け・狙い ({currentBucket === '共通' ? 'チーム共通' : currentBucket})</label>
                   <textarea className="w-full bg-gray-50 border border-gray-200 rounded p-2 text-xs font-bold text-gray-800 leading-relaxed h-14 bg-transparent" value={currentData.plans[selectedGroup].position} onChange={(e)=>updatePlan('position', e.target.value)} readOnly={isViewer}/>
@@ -1126,6 +1217,12 @@
 
             {activeTab === 'practice' && currentData.practices[selectedGroup] && (
               <div className="space-y-4 fade-in print-break-inside-avoid">
+                {currentData.reviewFlags[selectedGroup] && currentData.reviewFlags[selectedGroup].practice && (
+                  <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 flex flex-col sm:flex-row justify-between items-center gap-2 no-print">
+                    <span className="text-xs font-bold text-amber-700"><i className="fas fa-exclamation-triangle mr-1.5"></i>このグループの育成計画が更新されています。練習メニューが今の方針と合っているか確認してください。</span>
+                    {!isViewer && <button onClick={() => clearReviewFlag(selectedGroup, 'practice')} className="bg-amber-500 hover:bg-amber-400 text-white text-xs font-bold px-3 py-1.5 rounded whitespace-nowrap">確認済みにする</button>}
+                  </div>
+                )}
                 <div className="flex justify-end mb-2 no-print">
                   <button onClick={addPractice} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-2 rounded shadow transition-all`}><i className="fas fa-plus mr-1"></i>練習枠を追加</button>
                 </div>
@@ -1148,6 +1245,12 @@
 
             {activeTab === 'reflection' && currentData.reflections[selectedGroup] && (
               <div className="space-y-4 fade-in print-break-inside-avoid">
+                {currentData.reviewFlags[selectedGroup] && currentData.reviewFlags[selectedGroup].reflection && (
+                  <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 flex flex-col sm:flex-row justify-between items-center gap-2 no-print">
+                    <span className="text-xs font-bold text-amber-700"><i className="fas fa-exclamation-triangle mr-1.5"></i>このグループの育成計画が更新されています。振り返りの観点が今の方針と合っているか確認してください。</span>
+                    {!isViewer && <button onClick={() => clearReviewFlag(selectedGroup, 'reflection')} className="bg-amber-500 hover:bg-amber-400 text-white text-xs font-bold px-3 py-1.5 rounded whitespace-nowrap">確認済みにする</button>}
+                  </div>
+                )}
                 <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
                   <h2 className="text-sm font-bold text-gray-800"><i className={`fas fa-sync-alt mr-1.5 ${theme.text}`}></i>大会後 振り返り ({currentBucket === '共通' ? 'チーム共通' : currentBucket})</h2>
                   <label className={`flex items-center space-x-2 text-xs font-bold cursor-pointer border px-3 py-1.5 rounded-lg transition-colors ${currentData.reflections[selectedGroup].completed ? 'bg-rose-50 border-rose-300 text-rose-600' : 'bg-white border-gray-300 text-gray-400'}`}>
