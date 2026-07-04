@@ -29,6 +29,10 @@
       body { background: white; } .no-print { display: none !important; } .print-only { display: block !important; }
       .shadow-md, .shadow-xl, .shadow-sm { box-shadow: none !important; border: 1px solid #ccc !important; }
       main { padding-top: 0 !important; } .print-break-inside-avoid { break-inside: avoid; }
+      @page { margin: 12mm; }
+      table { font-size: 10px; }
+      textarea, input { border: none !important; background: transparent !important; }
+      .bg-gray-50, .bg-gray-100 { background: #fff !important; }
     }
   </style>
 </head>
@@ -133,21 +137,57 @@
 
     const buildInitialReflections = () => {
       const r = {};
-      GROUPS.forEach(g => { r[g.id] = { completed: false, good: '', bad: '', nextAction: '' }; });
+      GROUPS.forEach(g => { r[g.id] = { completed: false, good: '', bad: '', nextAction: '', comments: [] }; });
       return r;
+    };
+
+    const buildInitialPlansWithComments = () => {
+      const p = JSON.parse(JSON.stringify(initialPlans));
+      GROUPS.forEach(g => { p[g].comments = []; });
+      return p;
     };
 
     // 1つのバケツ（男子 / 女子 / 共通）分のテンプレートを作る
     const buildBucketTemplate = (labelPrefix) => ({
+      activeGroup: 'A', // このチーム・このバケツの「現在の進行フェーズ」（チーム/男女ごとに独立して保持する）
       tournaments: initialTournaments.map(t => ({
         ...t,
         id: uid('t'),
+        result: '', // 大会結果（順位・戦績・メモ）
         name: (labelPrefix && t.name.includes('大会')) ? `${labelPrefix} ${t.name}` : t.name
       })),
-      plans: JSON.parse(JSON.stringify(initialPlans)),
+      plans: buildInitialPlansWithComments(),
       practices: buildInitialPractices(),
-      reflections: buildInitialReflections()
+      reflections: buildInitialReflections(),
+      roster: [], // 選手名簿
+      sessions: [] // 出欠記録（練習日ごとの出席チェック）
     });
+
+    // 以前のバージョンで作られたデータには roster/sessions/result/comments が無いことがあるため、
+    // 読み込み時に不足分を安全に補完する（データ移行なしで新機能を使えるようにするため）
+    const normalizeBucketData = (data) => {
+      if (!data) return data;
+      const tournaments = (data.tournaments || []).map(t => ({ result: '', ...t }));
+      const plans = {};
+      GROUPS.forEach(g => {
+        const p = (data.plans && data.plans[g.id]) || initialPlans[g.id] || {};
+        plans[g.id] = { position: '', back: '', front: '', team: '', level: '', comments: [], ...p, comments: (p.comments || []) };
+      });
+      const reflections = {};
+      GROUPS.forEach(g => {
+        const r = (data.reflections && data.reflections[g.id]) || {};
+        reflections[g.id] = { completed: false, good: '', bad: '', nextAction: '', ...r, comments: (r.comments || []) };
+      });
+      return {
+        activeGroup: data.activeGroup || 'A',
+        tournaments,
+        plans,
+        practices: data.practices || buildInitialPractices(),
+        reflections,
+        roster: data.roster || [],
+        sessions: data.sessions || []
+      };
+    };
 
     // 1年度分のデータ（男子・女子・共通の3バケツ）を新規生成
     const generateYearData = () => {
@@ -161,6 +201,14 @@
 
     const initialGlobalStore = {
       "西ノ京中学校": { "2026": generateYearData() }
+    };
+
+    const downloadBlob = (filename, content, type) => {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
     };
 
     // ================= ログイン画面 =================
@@ -250,15 +298,28 @@
     };
 
     // ================= 管理者ページ =================
+    const ROLE_LABELS = { admin: '管理者', editor: '編集者', viewer: '閲覧のみ', coach: '編集者' };
+    const normalizeRole = (r) => (r === 'coach' ? 'editor' : (r || 'editor'));
+
     const AdminPage = ({ profile, onBack }) => {
       const [users, setUsers] = useState(null);
+      const [teams, setTeams] = useState([]);
+      const [teamsLoading, setTeamsLoading] = useState(true);
+
       const [name, setName] = useState('');
       const [email, setEmail] = useState('');
       const [password, setPassword] = useState('');
-      const [role, setRole] = useState('coach');
+      const [role, setRole] = useState('editor');
+      const [newUserTeams, setNewUserTeams] = useState([]);
       const [busy, setBusy] = useState(false);
       const [msg, setMsg] = useState('');
       const [error, setError] = useState('');
+
+      const [newTeamName, setNewTeamName] = useState('');
+      const [teamBusy, setTeamBusy] = useState(false);
+      const [teamMsg, setTeamMsg] = useState('');
+
+      const [expandedUser, setExpandedUser] = useState(null);
 
       useEffect(() => {
         const unsub = db.collection('users').orderBy('createdAt', 'asc').onSnapshot(snap => {
@@ -269,6 +330,18 @@
         return unsub;
       }, []);
 
+      useEffect(() => {
+        const unsub = db.collection('teams').onSnapshot(snap => {
+          const list = snap.docs.map(d => d.id).sort();
+          setTeams(list);
+          setTeamsLoading(false);
+          // 新規アカウント作成フォームの初期チェックは、まだ何も選んでいなければ全チームにしておく
+          setNewUserTeams(prev => prev.length ? prev : list);
+        }, () => setTeamsLoading(false));
+        return unsub;
+      }, []);
+
+      // ---- コーチ/管理者アカウントの追加 ----
       const handleAddCoach = async (e) => {
         e.preventDefault();
         setError(''); setMsg(''); setBusy(true);
@@ -276,13 +349,15 @@
           const secAuth = getSecondaryAuth();
           const cred = await secAuth.createUserWithEmailAndPassword(email.trim(), password);
           await db.collection('users').doc(cred.user.uid).set({
-            name: name.trim(), email: email.trim(), role, active: true,
+            name: name.trim(), email: email.trim(), role,
+            allowedTeams: role === 'admin' ? [] : newUserTeams,
+            active: true,
             createdAt: firebase.firestore.FieldValue.serverTimestamp(),
             createdBy: profile.email || ''
           });
           await secAuth.signOut();
-          setName(''); setEmail(''); setPassword(''); setRole('coach');
-          setMsg('コーチアカウントを作成しました。');
+          setName(''); setEmail(''); setPassword(''); setRole('editor'); setNewUserTeams(teams);
+          setMsg('アカウントを作成しました。');
         } catch (err) {
           setError('作成に失敗しました：' + (err && err.message ? err.message : ''));
         }
@@ -299,11 +374,77 @@
           alert('送信に失敗しました：' + (err && err.message ? err.message : ''));
         }
       };
+      const toggleUserTeam = (u, teamName) => {
+        const current = Array.isArray(u.allowedTeams) ? u.allowedTeams : [];
+        const next = current.includes(teamName) ? current.filter(t => t !== teamName) : [...current, teamName];
+        db.collection('users').doc(u.id).update({ allowedTeams: next });
+      };
+      const grantAllTeams = (u) => db.collection('users').doc(u.id).update({ allowedTeams: teams });
+      const revokeAllTeams = (u) => db.collection('users').doc(u.id).update({ allowedTeams: [] });
+
+      // ---- チーム管理 ----
+      const handleAddTeamAdmin = async (e) => {
+        e.preventDefault();
+        const name2 = newTeamName.trim();
+        if (!name2) return;
+        if (teams.includes(name2)) { setTeamMsg('同名のチームが既に存在します。'); return; }
+        setTeamBusy(true); setTeamMsg('');
+        try {
+          const years = { "2026": generateYearData() };
+          await db.collection('teams').doc(name2).set({ years, updatedAt: firebase.firestore.FieldValue.serverTimestamp(), updatedBy: profile.name || profile.email });
+          setNewTeamName('');
+          setTeamMsg(`「${name2}」を作成しました。`);
+        } catch (err) {
+          setTeamMsg('作成に失敗しました：' + (err && err.message ? err.message : ''));
+        }
+        setTeamBusy(false);
+      };
+
+      const handleRenameTeam = async (oldName) => {
+        const newName = prompt(`新しいチーム名を入力してください（現在: ${oldName}）`, oldName);
+        if (!newName || newName.trim() === '' || newName === oldName) return;
+        if (teams.includes(newName)) { alert('同名のチームが既に存在します。'); return; }
+        try {
+          const doc = await db.collection('teams').doc(oldName).get();
+          if (!doc.exists) return;
+          await db.collection('teams').doc(newName).set(doc.data());
+          await db.collection('teams').doc(oldName).delete();
+          const usersSnap = await db.collection('users').get();
+          const batch = db.batch();
+          usersSnap.forEach(u => {
+            const data = u.data();
+            if (Array.isArray(data.allowedTeams) && data.allowedTeams.includes(oldName)) {
+              batch.update(u.ref, { allowedTeams: data.allowedTeams.map(t => t === oldName ? newName : t) });
+            }
+          });
+          await batch.commit();
+        } catch (err) {
+          alert('名称変更に失敗しました：' + (err && err.message ? err.message : ''));
+        }
+      };
+
+      const handleDeleteTeam = async (teamName) => {
+        if (!window.confirm(`「${teamName}」を削除します。全てのデータが失われ、元に戻せません。本当に削除しますか？`)) return;
+        try {
+          await db.collection('teams').doc(teamName).delete();
+          const usersSnap = await db.collection('users').get();
+          const batch = db.batch();
+          usersSnap.forEach(u => {
+            const data = u.data();
+            if (Array.isArray(data.allowedTeams) && data.allowedTeams.includes(teamName)) {
+              batch.update(u.ref, { allowedTeams: data.allowedTeams.filter(t => t !== teamName) });
+            }
+          });
+          await batch.commit();
+        } catch (err) {
+          alert('削除に失敗しました：' + (err && err.message ? err.message : ''));
+        }
+      };
 
       return (
         <div className="min-h-screen bg-gray-100">
           <div className="bg-slate-900 text-white sticky top-0 z-40 shadow-xl">
-            <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
               <div>
                 <span className="bg-amber-500 text-white text-[10px] font-black px-2 py-0.5 rounded uppercase mr-2">ADMIN</span>
                 <span className="font-black">管理者ページ</span>
@@ -312,60 +453,183 @@
             </div>
           </div>
 
-          <div className="max-w-4xl mx-auto p-4 space-y-6">
+          <div className="max-w-5xl mx-auto p-4 space-y-6">
+
+            {/* ---- チーム管理 ---- */}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-              <h2 className="font-black text-gray-800 mb-3 text-sm"><i className="fas fa-user-plus text-blue-500 mr-1.5"></i>コーチアカウントを追加</h2>
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="font-black text-gray-800 text-sm"><i className="fas fa-shield-alt text-emerald-500 mr-1.5"></i>チーム管理</h2>
+                <button onClick={async () => {
+                  const snap = await db.collection('teams').get();
+                  const all = {};
+                  snap.forEach(d => { all[d.id] = d.data().years; });
+                  downloadBlob(`KST_全チームバックアップ_${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(all, null, 2), 'application/json');
+                }} className="bg-gray-600 hover:bg-gray-500 text-white text-xs font-bold px-3 py-1.5 rounded"><i className="fas fa-file-download mr-1"></i>全チームをバックアップ(JSON)</button>
+              </div>
+              {teamMsg && <div className="bg-blue-50 text-blue-600 text-xs font-bold p-2 rounded mb-3 border border-blue-200">{teamMsg}</div>}
+              <form onSubmit={handleAddTeamAdmin} className="flex gap-2 mb-4">
+                <input value={newTeamName} onChange={e=>setNewTeamName(e.target.value)} placeholder="新規チーム名（例：上京中学校）" className="flex-grow border border-gray-300 rounded p-2 text-sm" />
+                <button disabled={teamBusy} type="submit" className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold px-4 py-2 rounded text-sm whitespace-nowrap"><i className="fas fa-plus mr-1"></i>チームを追加</button>
+              </form>
+              <div className="divide-y divide-gray-100 border border-gray-100 rounded-lg overflow-hidden">
+                {teamsLoading && <div className="p-3 text-xs text-gray-400">読み込み中...</div>}
+                {!teamsLoading && teams.length === 0 && <div className="p-3 text-xs text-gray-400">チームがありません</div>}
+                {teams.map(t => (
+                  <div key={t} className="flex items-center justify-between p-3 text-sm bg-white">
+                    <span className="font-bold text-gray-700"><i className="fas fa-users-cog text-gray-400 mr-2"></i>{t}</span>
+                    <div className="flex gap-2">
+                      <button onClick={() => handleRenameTeam(t)} className="text-[11px] font-bold px-2 py-1 rounded bg-gray-100 hover:bg-gray-200"><i className="fas fa-pen mr-1"></i>名称変更</button>
+                      <button onClick={() => handleDeleteTeam(t)} className="text-[11px] font-bold px-2 py-1 rounded bg-rose-50 text-rose-600 hover:bg-rose-100"><i className="fas fa-trash-alt mr-1"></i>削除</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ---- アカウント追加 ---- */}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+              <h2 className="font-black text-gray-800 mb-3 text-sm"><i className="fas fa-user-plus text-blue-500 mr-1.5"></i>アカウントを追加</h2>
               {error && <div className="bg-rose-50 text-rose-600 text-xs font-bold p-2 rounded mb-3 border border-rose-200">{error}</div>}
               {msg && <div className="bg-emerald-50 text-emerald-600 text-xs font-bold p-2 rounded mb-3 border border-emerald-200">{msg}</div>}
-              <form onSubmit={handleAddCoach} className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-                <div><label className="text-[10px] font-bold text-gray-500 block mb-1">名前</label><input required value={name} onChange={e=>setName(e.target.value)} className="w-full border border-gray-300 rounded p-2 text-sm"/></div>
-                <div><label className="text-[10px] font-bold text-gray-500 block mb-1">メール</label><input required type="email" value={email} onChange={e=>setEmail(e.target.value)} className="w-full border border-gray-300 rounded p-2 text-sm"/></div>
-                <div><label className="text-[10px] font-bold text-gray-500 block mb-1">初期パスワード</label><input required minLength={6} value={password} onChange={e=>setPassword(e.target.value)} className="w-full border border-gray-300 rounded p-2 text-sm"/></div>
-                <div className="flex gap-2">
-                  <div className="flex-grow"><label className="text-[10px] font-bold text-gray-500 block mb-1">権限</label>
+              <form onSubmit={handleAddCoach} className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                  <div><label className="text-[10px] font-bold text-gray-500 block mb-1">名前</label><input required value={name} onChange={e=>setName(e.target.value)} className="w-full border border-gray-300 rounded p-2 text-sm"/></div>
+                  <div><label className="text-[10px] font-bold text-gray-500 block mb-1">メール</label><input required type="email" value={email} onChange={e=>setEmail(e.target.value)} className="w-full border border-gray-300 rounded p-2 text-sm"/></div>
+                  <div><label className="text-[10px] font-bold text-gray-500 block mb-1">初期パスワード</label><input required minLength={6} value={password} onChange={e=>setPassword(e.target.value)} className="w-full border border-gray-300 rounded p-2 text-sm"/></div>
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-500 block mb-1">権限</label>
                     <select value={role} onChange={e=>setRole(e.target.value)} className="w-full border border-gray-300 rounded p-2 text-sm">
-                      <option value="coach">コーチ</option><option value="admin">管理者</option>
+                      <option value="editor">編集者（編集できる）</option>
+                      <option value="viewer">閲覧のみ</option>
+                      <option value="admin">管理者</option>
                     </select>
                   </div>
-                  <button disabled={busy} type="submit" className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold px-4 py-2 rounded text-sm whitespace-nowrap">追加</button>
                 </div>
+                {role !== 'admin' && (
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                    <label className="text-[10px] font-bold text-gray-500 block mb-2">編集/閲覧を許可するチーム</label>
+                    <div className="flex flex-wrap gap-2">
+                      {teams.map(t => (
+                        <label key={t} className={`text-xs font-bold px-2.5 py-1.5 rounded-full border cursor-pointer ${newUserTeams.includes(t) ? 'bg-blue-500 text-white border-blue-500' : 'bg-white text-gray-500 border-gray-300'}`}>
+                          <input type="checkbox" className="hidden" checked={newUserTeams.includes(t)} onChange={() => setNewUserTeams(prev => prev.includes(t) ? prev.filter(x=>x!==t) : [...prev, t])} />
+                          {t}
+                        </label>
+                      ))}
+                      {teams.length === 0 && <span className="text-xs text-gray-400">先にチームを作成してください</span>}
+                    </div>
+                  </div>
+                )}
+                <button disabled={busy} type="submit" className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold px-4 py-2 rounded text-sm">アカウントを作成</button>
               </form>
             </div>
 
+            {/* ---- アカウント一覧 ---- */}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               <h2 className="font-black text-gray-800 text-sm p-5 pb-3"><i className="fas fa-users text-blue-500 mr-1.5"></i>アカウント一覧</h2>
               <table className="w-full text-left text-xs">
                 <thead><tr className="bg-gray-50 text-gray-500 font-bold border-y">
-                  <th className="p-3">名前</th><th className="p-3">メール</th><th className="p-3">権限</th><th className="p-3">状態</th><th className="p-3">操作</th>
+                  <th className="p-3">名前</th><th className="p-3">メール</th><th className="p-3">権限</th><th className="p-3">状態</th><th className="p-3">チーム権限</th><th className="p-3">操作</th>
                 </tr></thead>
                 <tbody className="divide-y divide-gray-100">
-                  {(users || []).map(u => (
-                    <tr key={u.id} className={!u.active ? 'opacity-40' : ''}>
-                      <td className="p-3 font-bold">{u.name}</td>
-                      <td className="p-3">{u.email}</td>
-                      <td className="p-3">
-                        <select value={u.role} onChange={e=>changeRole(u, e.target.value)} className="border border-gray-300 rounded p-1 text-xs">
-                          <option value="coach">コーチ</option><option value="admin">管理者</option>
-                        </select>
-                      </td>
-                      <td className="p-3">{u.active ? <span className="text-emerald-600 font-bold">有効</span> : <span className="text-gray-400 font-bold">無効</span>}</td>
-                      <td className="p-3 flex gap-2">
-                        <button onClick={() => toggleActive(u)} className="text-[11px] font-bold px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">{u.active ? '無効化' : '有効化'}</button>
-                        <button onClick={() => resetPassword(u)} className="text-[11px] font-bold px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">PW再設定</button>
-                      </td>
-                    </tr>
-                  ))}
-                  {users && users.length === 0 && <tr><td colSpan="5" className="p-4 text-center text-gray-400">アカウントがありません</td></tr>}
+                  {(users || []).map(u => {
+                    const uRole = normalizeRole(u.role);
+                    const hasExplicitTeams = Array.isArray(u.allowedTeams);
+                    return (
+                      <React.Fragment key={u.id}>
+                        <tr className={!u.active ? 'opacity-40' : ''}>
+                          <td className="p-3 font-bold">{u.name}</td>
+                          <td className="p-3">{u.email}</td>
+                          <td className="p-3">
+                            <select value={uRole} onChange={e=>changeRole(u, e.target.value)} className="border border-gray-300 rounded p-1 text-xs">
+                              <option value="editor">編集者</option>
+                              <option value="viewer">閲覧のみ</option>
+                              <option value="admin">管理者</option>
+                            </select>
+                          </td>
+                          <td className="p-3">{u.active ? <span className="text-emerald-600 font-bold">有効</span> : <span className="text-gray-400 font-bold">無効</span>}</td>
+                          <td className="p-3">
+                            {uRole === 'admin' ? (
+                              <span className="text-[11px] text-gray-400">全チーム（管理者）</span>
+                            ) : (
+                              <button onClick={() => setExpandedUser(expandedUser === u.id ? null : u.id)} className="text-[11px] font-bold px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">
+                                {hasExplicitTeams ? `${u.allowedTeams.length}チーム` : '全チーム（未設定）'} <i className="fas fa-caret-down ml-1"></i>
+                              </button>
+                            )}
+                          </td>
+                          <td className="p-3 flex gap-2 flex-wrap">
+                            <button onClick={() => toggleActive(u)} className="text-[11px] font-bold px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">{u.active ? '無効化' : '有効化'}</button>
+                            <button onClick={() => resetPassword(u)} className="text-[11px] font-bold px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">PW再設定</button>
+                          </td>
+                        </tr>
+                        {expandedUser === u.id && uRole !== 'admin' && (
+                          <tr>
+                            <td colSpan="6" className="p-3 bg-gray-50">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-[11px] font-bold text-gray-500">「{u.name}」がアクセスできるチーム（チェックで編集/閲覧を許可）</span>
+                                <div className="flex gap-2">
+                                  <button onClick={() => grantAllTeams(u)} className="text-[10px] font-bold px-2 py-1 rounded bg-blue-50 text-blue-600 hover:bg-blue-100">全て許可</button>
+                                  <button onClick={() => revokeAllTeams(u)} className="text-[10px] font-bold px-2 py-1 rounded bg-rose-50 text-rose-600 hover:bg-rose-100">全て解除</button>
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                {teams.map(t => {
+                                  const checked = Array.isArray(u.allowedTeams) && u.allowedTeams.includes(t);
+                                  return (
+                                    <label key={t} className={`text-xs font-bold px-2.5 py-1.5 rounded-full border cursor-pointer ${checked ? 'bg-blue-500 text-white border-blue-500' : 'bg-white text-gray-500 border-gray-300'}`}>
+                                      <input type="checkbox" className="hidden" checked={checked} onChange={() => toggleUserTeam(u, t)} />
+                                      {t}
+                                    </label>
+                                  );
+                                })}
+                                {teams.length === 0 && <span className="text-xs text-gray-400">チームがありません</span>}
+                              </div>
+                              {!hasExplicitTeams && <p className="text-[10px] text-amber-600 mt-2"><i className="fas fa-info-circle mr-1"></i>まだチーム権限が未設定のため、現在は全チームを利用できています。チェックを1つでも操作すると、選択したチームのみに制限されます。</p>}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                  {users && users.length === 0 && <tr><td colSpan="6" className="p-4 text-center text-gray-400">アカウントがありません</td></tr>}
                 </tbody>
               </table>
             </div>
-            <p className="text-[10px] text-gray-400">※「無効化」したアカウントはこのアプリへのログインができなくなります（既にログイン中の場合は次回チェック時に自動的にログアウトされます）。</p>
+            <p className="text-[10px] text-gray-400">※「無効化」したアカウントはこのアプリへのログインができなくなります（既にログイン中の場合は次回チェック時に自動的にログアウトされます）。<br/>※「閲覧のみ」権限のアカウントは、許可されたチームのデータを見ることはできますが、編集・保存はできません。</p>
           </div>
         </div>
       );
     };
 
     // ================= メインアプリ（練習管理） =================
+    // ================= コメントスレッド（育成計画・振り返り共通） =================
+    const CommentThread = ({ comments, onAdd, onDelete, isViewer }) => {
+      const [text, setText] = useState('');
+      const list = comments || [];
+      return (
+        <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 mt-2">
+          <div className="text-[11px] font-black text-gray-500 mb-2"><i className="fas fa-comments mr-1.5"></i>コーチ間コメント（{list.length}）</div>
+          <div className="space-y-2 mb-3 max-h-48 overflow-y-auto">
+            {list.length === 0 && <p className="text-[11px] text-gray-400">まだコメントはありません。</p>}
+            {list.slice().sort((a,b)=>a.at-b.at).map(c => (
+              <div key={c.id} className="bg-white border border-gray-200 rounded-lg p-2 text-xs flex justify-between items-start gap-2">
+                <div>
+                  <div className="font-bold text-gray-700">{c.author} <span className="text-[10px] text-gray-400 font-normal ml-1">{new Date(c.at).toLocaleString('ja-JP')}</span></div>
+                  <div className="text-gray-600 whitespace-pre-wrap">{c.text}</div>
+                </div>
+                {!isViewer && <button onClick={() => onDelete(c.id)} className="text-gray-300 hover:text-red-500 text-[11px] no-print"><i className="fas fa-times"></i></button>}
+              </div>
+            ))}
+          </div>
+          {!isViewer && (
+            <div className="flex gap-2 no-print">
+              <input value={text} onChange={e=>setText(e.target.value)} placeholder="コメントを追加..." className="flex-grow border border-gray-300 rounded p-2 text-xs" onKeyDown={e => { if (e.key === 'Enter') { onAdd(text); setText(''); } }} />
+              <button onClick={() => { onAdd(text); setText(''); }} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold px-3 py-2 rounded">送信</button>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const TrainingApp = ({ profile, onGoAdmin, onLogout }) => {
       const [globalStore, setGlobalStore] = useState(null);
       const [isLoading, setIsLoading] = useState(true);
@@ -375,7 +639,6 @@
       const [currentBucket, setCurrentBucket] = useState(() => localStorage.getItem('kst_v6_bucket') || "男子");
 
       const [activeTab, setActiveTab] = useState('dashboard');
-      const [activeGroup, setActiveGroup] = useState(() => localStorage.getItem('kst_v6_activeGroup') || "A");
       const [selectedGroup, setSelectedGroup] = useState("A");
 
       const [showSaveMessage, setShowSaveMessage] = useState(false);
@@ -388,7 +651,10 @@
       const saveTimerRef = useRef(null);
       const lastSentRef = useRef({}); // { [team]: jsonString } 自分が最後に送った内容（エコー判定用）
 
-      // ---- Firestore: 全チームをリアルタイム購読 ----
+      const isViewer = normalizeRole(profile.role) === 'viewer';
+      const isAdmin = normalizeRole(profile.role) === 'admin';
+
+      // ---- Firestore: 全チームをリアルタイム購読（削除にも追従するよう毎回完全に組み直す） ----
       useEffect(() => {
         const unsub = db.collection('teams').onSnapshot(snapshot => {
           if (snapshot.empty) {
@@ -400,44 +666,96 @@
             batch.commit();
             return;
           }
-          const store = {};
           const meta = {};
-          snapshot.forEach(doc => {
-            const data = doc.data();
-            if (doc.id === dirtyTeamRef.current) return; // 編集中はスキップ
-            const asJson = JSON.stringify(data.years);
-            if (lastSentRef.current[doc.id] === asJson) return; // 自分が送ったエコーはスキップ（無駄な再描画防止）
-            store[doc.id] = data.years;
-            meta[doc.id] = { updatedBy: data.updatedBy, updatedAt: data.updatedAt };
+          setGlobalStore(prev => {
+            const store = {};
+            snapshot.forEach(doc => {
+              const data = doc.data();
+              meta[doc.id] = { updatedBy: data.updatedBy, updatedAt: data.updatedAt };
+              if (doc.id === dirtyTeamRef.current && prev && prev[doc.id]) {
+                store[doc.id] = prev[doc.id]; // 保存待ちの自分の編集内容を優先
+              } else {
+                store[doc.id] = data.years;
+              }
+            });
+            return store;
           });
-          setGlobalStore(prev => ({ ...(prev || {}), ...store }));
-          setLastMeta(prev => ({ ...prev, ...meta }));
+          setLastMeta(meta);
           setIsLoading(false);
         }, err => { console.error('購読エラー', err); setIsLoading(false); });
         return unsub;
       }, []);
 
+      // ---- このユーザーが見える/編集できるチーム一覧（管理者は常に全チーム） ----
+      const allowedTeamsForUser = isAdmin ? null : (Array.isArray(profile.allowedTeams) ? profile.allowedTeams : null);
+      const visibleTeams = globalStore ? Object.keys(globalStore).filter(t => allowedTeamsForUser === null || allowedTeamsForUser.includes(t)).sort() : [];
+
+      // 権限がないチームを選んでいる場合は、見えるチームに自動で切り替える
+      useEffect(() => {
+        if (globalStore && visibleTeams.length && !visibleTeams.includes(currentTeam)) {
+          setCurrentTeam(visibleTeams[0]);
+        }
+      }, [globalStore, JSON.stringify(visibleTeams), currentTeam]);
+
       useEffect(() => {
         localStorage.setItem('kst_v6_team', currentTeam);
         localStorage.setItem('kst_v6_year', currentYear);
         localStorage.setItem('kst_v6_bucket', currentBucket);
-        localStorage.setItem('kst_v6_activeGroup', activeGroup);
-        setSelectedGroup(activeGroup);
-      }, [currentTeam, currentYear, currentBucket, activeGroup]);
+      }, [currentTeam, currentYear, currentBucket]);
+
+      // 派生データ（globalStoreが未取得でも安全なフォールバックを用意）
+      const teamData = (globalStore && globalStore[currentTeam]) || { "2026": generateYearData() };
+      const availableYears = Object.keys(teamData).sort();
+      const actualYear = availableYears.includes(currentYear) ? currentYear : availableYears[0];
+      let yearData = teamData[actualYear];
+      if (!yearData || !yearData['男子']) yearData = generateYearData();
+      const currentData = normalizeBucketData(yearData[currentBucket]);
+
+      // チーム / 年度 / 男女共通バケツを切り替えたら、そのチーム・そのバケツが
+      // 保持している「現在の進行フェーズ」に編集対象グループを追従させる（バグ修正の本体）
+      useEffect(() => {
+        setSelectedGroup(currentData.activeGroup || 'A');
+      }, [currentTeam, actualYear, currentBucket, currentData.activeGroup]);
+
+      // ---- 更新履歴（操作ログ） ----
+      const [activityLog, setActivityLog] = useState([]);
+      useEffect(() => {
+        const unsub = db.collection('teams').doc(currentTeam).collection('activity').orderBy('updatedAt', 'desc').limit(30)
+          .onSnapshot(snap => setActivityLog(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => setActivityLog([]));
+        return unsub;
+      }, [currentTeam]);
+
+      // ---- 通知: 他の指導者が今のチームを更新したら軽く知らせる ----
+      const [toast, setToast] = useState(null);
+      const seenMetaRef = useRef({});
+      useEffect(() => {
+        const m = lastMeta[currentTeam];
+        if (!m || !m.updatedAt || !m.updatedAt.toMillis) return;
+        const millis = m.updatedAt.toMillis();
+        const prevSeen = seenMetaRef.current[currentTeam];
+        const myName = profile.name || profile.email;
+        if (prevSeen !== undefined && millis > prevSeen && m.updatedBy && m.updatedBy !== myName) {
+          setToast(`${m.updatedBy} さんが「${currentTeam}」を更新しました`);
+          setTimeout(() => setToast(null), 4000);
+        }
+        seenMetaRef.current[currentTeam] = millis;
+      }, [lastMeta, currentTeam]);
 
       if (isLoading || !globalStore) {
         return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white"><div className="loader mb-4"></div><p className="font-bold">同期中...</p></div>;
       }
 
-      const teamData = globalStore[currentTeam] || { "2026": generateYearData() };
-      const availableYears = Object.keys(teamData).sort();
-      const actualYear = availableYears.includes(currentYear) ? currentYear : availableYears[0];
-      let yearData = teamData[actualYear];
-      if (!yearData || !yearData['男子']) yearData = generateYearData();
-      const currentData = yearData[currentBucket];
+      if (!isAdmin && visibleTeams.length === 0) {
+        return (
+          <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white gap-4 p-4 text-center">
+            <p className="font-bold text-sm">アクセスできるチームがありません。管理者にチーム権限の設定を依頼してください。</p>
+            <button onClick={onLogout} className="bg-slate-700 hover:bg-slate-600 text-xs font-bold px-4 py-2 rounded">ログアウト</button>
+          </div>
+        );
+      }
 
-      // ---- 保存処理（デバウンス + チーム単位でFirestoreに書き込み） ----
-      const persist = (teamName, years) => {
+      // ---- 保存処理（デバウンス + チーム単位でFirestoreに書き込み + 履歴/公開カレンダーの更新） ----
+      const persist = (teamName, years, changedBucketData) => {
         dirtyTeamRef.current = teamName;
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
         saveTimerRef.current = setTimeout(() => {
@@ -450,22 +768,44 @@
               dirtyTeamRef.current = null;
             })
             .catch(err => { console.error('保存エラー', err); dirtyTeamRef.current = null; });
+
+          // 変更履歴（操作ログ）: チームごとに直近の更新を追記していく
+          db.collection('teams').doc(teamName).collection('activity').add({
+            bucket: currentBucket, year: actualYear, updatedBy: profile.name || profile.email,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          }).catch(() => {});
+
+          // 保護者向け公開カレンダー: 大会情報（結果含む）だけを別コレクションにミラーする
+          if (changedBucketData) {
+            db.collection('publicCalendars').doc(teamName).set({
+              [`tournaments.${currentBucket}`]: (changedBucketData.tournaments || []).map(t => ({
+                month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || ''
+              })),
+              teamName,
+              updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            }, { merge: true }).catch(() => {});
+          }
         }, 900);
       };
 
       const updateStore = (updater) => {
+        if (isViewer) return; // 閲覧のみ権限では保存させない
         setHistory(prev => [...prev.slice(-9), globalStore]);
         setGlobalStore(prev => {
           const prevYears = prev[currentTeam][actualYear];
-          const newBucketData = updater(prevYears[currentBucket]);
+          const normalizedBucket = normalizeBucketData(prevYears[currentBucket]);
+          const newBucketData = updater(normalizedBucket);
           const newYears = { ...prevYears, [currentBucket]: newBucketData };
           const newTeamYears = { ...prev[currentTeam], [actualYear]: newYears };
-          persist(currentTeam, newTeamYears);
+          persist(currentTeam, newTeamYears, newBucketData);
           return { ...prev, [currentTeam]: newTeamYears };
         });
       };
 
+      const updateActiveGroup = (value) => updateStore(d => ({ ...d, activeGroup: value }));
+
       const handleUndo = () => {
+        if (isViewer) return;
         if (history.length === 0) return;
         const prevState = history[history.length - 1];
         setGlobalStore(prevState);
@@ -473,18 +813,10 @@
         persist(currentTeam, prevState[currentTeam]);
       };
 
-      const handleAddTeam = () => {
-        const teamName = prompt('新規チーム名を入力:');
-        if (teamName && !globalStore[teamName]) {
-          const newYears = { "2026": generateYearData() };
-          setHistory(prev => [...prev, globalStore]);
-          setGlobalStore(prev => ({ ...prev, [teamName]: newYears }));
-          db.collection('teams').doc(teamName).set({ years: newYears, updatedAt: firebase.firestore.FieldValue.serverTimestamp(), updatedBy: profile.name || profile.email });
-          setCurrentTeam(teamName); setCurrentYear("2026");
-        }
-      };
+      // チームの新規作成・名称変更・削除は管理者ページに集約（誤操作防止のため）
 
       const handleAddYear = () => {
+        if (isViewer) return;
         const nextYear = String(Number(actualYear) + 1);
         if (window.confirm(`${nextYear}年度を作成し、ノウハウを引き継ぎますか？`)) {
           const newYearData = generateYearData();
@@ -510,6 +842,48 @@
       const deletePractice = (idx) => { if(window.confirm('削除しますか？')) updateStore(d => ({...d, practices: {...d.practices, [selectedGroup]: d.practices[selectedGroup].filter((_, i) => i !== idx)}})); };
       const updateReflection = (field, value) => updateStore(d => ({...d, reflections: {...d.reflections, [selectedGroup]: {...d.reflections[selectedGroup], [field]: value}}}));
 
+      // ---- 大会結果 ----
+      const updateTournamentResult = (idx, value) => updateStore(d => { const arr = [...d.tournaments]; arr[idx] = { ...arr[idx], result: value }; return { ...d, tournaments: arr }; });
+
+      // ---- コメント（育成計画・振り返り） ----
+      const addPlanComment = (text) => { if (!text || !text.trim()) return; updateStore(d => ({...d, plans: {...d.plans, [selectedGroup]: {...d.plans[selectedGroup], comments: [...(d.plans[selectedGroup].comments||[]), {id: uid('cm'), author: profile.name || profile.email, text: text.trim(), at: Date.now()}]}}})); };
+      const deletePlanComment = (cid) => updateStore(d => ({...d, plans: {...d.plans, [selectedGroup]: {...d.plans[selectedGroup], comments: (d.plans[selectedGroup].comments||[]).filter(c=>c.id!==cid)}}}));
+      const addReflectionComment = (text) => { if (!text || !text.trim()) return; updateStore(d => ({...d, reflections: {...d.reflections, [selectedGroup]: {...d.reflections[selectedGroup], comments: [...(d.reflections[selectedGroup].comments||[]), {id: uid('cm'), author: profile.name || profile.email, text: text.trim(), at: Date.now()}]}}})); };
+      const deleteReflectionComment = (cid) => updateStore(d => ({...d, reflections: {...d.reflections, [selectedGroup]: {...d.reflections[selectedGroup], comments: (d.reflections[selectedGroup].comments||[]).filter(c=>c.id!==cid)}}}));
+
+      // ---- 名簿 ----
+      const addPlayer = () => updateStore(d => ({...d, roster: [...(d.roster||[]), {id: uid('pl'), name: '新しい選手', grade: '', position: '後衛', note: '', active: true}]}));
+      const updatePlayer = (idx, field, value) => updateStore(d => { const arr = [...(d.roster||[])]; arr[idx] = {...arr[idx], [field]: value}; return {...d, roster: arr}; });
+      const deletePlayer = (idx) => { if(window.confirm('選手を削除しますか？（出欠記録も一緒に削除されます）')) updateStore(d => { const removedId = (d.roster||[])[idx] && d.roster[idx].id; const roster = (d.roster||[]).filter((_,i)=>i!==idx); const sessions = (d.sessions||[]).map(s => { const att = {...s.attendance}; delete att[removedId]; return {...s, attendance: att}; }); return {...d, roster, sessions}; }); };
+
+      // ---- 出欠 ----
+      const addSession = () => updateStore(d => ({...d, sessions: [...(d.sessions||[]), {id: uid('se'), date: new Date().toISOString().slice(0,10), note: '', attendance: {}}]}));
+      const updateSessionField = (idx, field, value) => updateStore(d => { const arr = [...(d.sessions||[])]; arr[idx] = {...arr[idx], [field]: value}; return {...d, sessions: arr}; });
+      const deleteSession = (idx) => { if(window.confirm('この出欠記録を削除しますか？')) updateStore(d => ({...d, sessions: (d.sessions||[]).filter((_,i)=>i!==idx)})); };
+      const toggleAttendance = (sessionIdx, playerId) => updateStore(d => { const arr = [...(d.sessions||[])]; const s = {...arr[sessionIdx]}; s.attendance = {...s.attendance, [playerId]: !s.attendance[playerId]}; arr[sessionIdx] = s; return {...d, sessions: arr}; });
+
+      // ---- エクスポート ----
+      const exportTeamJson = () => {
+        downloadBlob(`${currentTeam}_${actualYear}.json`, JSON.stringify(teamData[actualYear], null, 2), 'application/json');
+      };
+      const exportTournamentsCsv = () => {
+        const rows = [['グループ','開催月','日程','大会名','カテゴリ','位置付け','結果']];
+        currentData.tournaments.forEach(t => rows.push([t.id, t.month, t.date, t.name, t.category, (t.target||'').replace(/\n/g,' '), (t.result||'').replace(/\n/g,' ')]));
+        const csv = rows.map(r => r.map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+        downloadBlob(`${currentTeam}_${currentBucket}_大会一覧.csv`, '\uFEFF' + csv, 'text/csv');
+      };
+
+      // ---- 保護者向け共有リンク ----
+      const publicLinkUrl = `${window.location.origin}${window.location.pathname}?public=1&team=${encodeURIComponent(currentTeam)}`;
+      const copyPublicLink = async () => {
+        try {
+          await navigator.clipboard.writeText(publicLinkUrl);
+          alert('共有リンクをコピーしました。\n' + publicLinkUrl);
+        } catch (e) {
+          prompt('このURLをコピーしてください:', publicLinkUrl);
+        }
+      };
+
       const themeConfig = {
         '男子': { bg: 'bg-blue-600', hover: 'hover:bg-blue-500', text: 'text-blue-500', border: 'border-blue-500', dashBg: 'from-blue-600 to-blue-800' },
         '女子': { bg: 'bg-pink-500', hover: 'hover:bg-pink-400', text: 'text-pink-500', border: 'border-pink-500', dashBg: 'from-pink-500 to-pink-700' },
@@ -522,6 +896,11 @@
 
       return (
         <div className="min-h-screen bg-gray-100 flex flex-col">
+          {toast && (
+            <div className="fixed top-4 right-4 z-[60] bg-slate-900 text-white text-xs font-bold px-4 py-3 rounded-lg shadow-2xl fade-in flex items-center gap-2 no-print">
+              <i className="fas fa-bell text-amber-400"></i>{toast}
+            </div>
+          )}
 
           <div className={`fixed top-0 left-0 right-0 z-50 bg-slate-900 text-white shadow-xl border-b-4 ${theme.border} no-print transition-colors duration-300`}>
 
@@ -536,21 +915,21 @@
               </div>
 
               <div className="flex flex-wrap items-center gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700 w-full lg:w-auto">
-                <button onClick={handleUndo} disabled={history.length === 0} className={`text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1 border ${history.length === 0 ? 'bg-slate-700 text-slate-500 border-slate-600' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-500'}`}><i className="fas fa-undo-alt"></i></button>
+                {isViewer && <span className="bg-gray-600 text-white text-[10px] font-black px-2 py-1 rounded uppercase"><i className="fas fa-eye mr-1"></i>閲覧のみ</span>}
+                <button onClick={handleUndo} disabled={history.length === 0 || isViewer} className={`text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1 border ${(history.length === 0 || isViewer) ? 'bg-slate-700 text-slate-500 border-slate-600' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-500'}`}><i className="fas fa-undo-alt"></i></button>
                 <button onClick={() => window.print()} className="bg-slate-700 hover:bg-slate-600 text-white border border-slate-500 text-xs font-bold px-3 py-1.5 rounded" title="印刷"><i className="fas fa-print"></i></button>
                 <div className="h-6 w-px bg-slate-600 mx-1"></div>
                 <select className="bg-slate-900 text-white border border-slate-600 font-bold text-sm p-1.5 rounded max-w-[120px] truncate" value={currentTeam} onChange={(e) => setCurrentTeam(e.target.value)}>
-                  {Object.keys(globalStore).map(team => <option key={team} value={team}>{team}</option>)}
+                  {visibleTeams.map(team => <option key={team} value={team}>{team}</option>)}
                 </select>
-                <button onClick={handleAddTeam} className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-2 py-1.5 rounded text-xs border border-slate-500"><i className="fas fa-plus"></i></button>
                 <div className="flex items-center gap-1 ml-auto lg:ml-2">
                   <select className={`bg-slate-900 ${theme.text} border border-slate-600 font-bold text-sm p-1.5 rounded`} value={actualYear} onChange={(e) => setCurrentYear(e.target.value)}>
                     {availableYears.map(y => <option key={y} value={y}>{y}年度</option>)}
                   </select>
-                  <button onClick={handleAddYear} className={`${theme.bg} ${theme.hover} text-white font-bold px-2 py-1.5 rounded text-xs`}><i className="fas fa-angle-double-right"></i></button>
+                  <button onClick={handleAddYear} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold px-2 py-1.5 rounded text-xs`}><i className="fas fa-angle-double-right"></i></button>
                 </div>
                 <div className="h-6 w-px bg-slate-600 mx-1"></div>
-                {profile.role === 'admin' && <button onClick={onGoAdmin} className="bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold px-3 py-1.5 rounded"><i className="fas fa-user-shield mr-1"></i>管理者</button>}
+                {isAdmin && <button onClick={onGoAdmin} className="bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold px-3 py-1.5 rounded"><i className="fas fa-user-shield mr-1"></i>管理者</button>}
                 <button onClick={onLogout} className="bg-slate-700 hover:bg-rose-600 text-white text-xs font-bold px-3 py-1.5 rounded"><i className="fas fa-sign-out-alt"></i></button>
               </div>
             </div>
@@ -571,6 +950,8 @@
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'plan' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('plan')}><i className="fas fa-bullseye mr-1.5"></i>育成計画</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'practice' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('practice')}><i className="fas fa-walking mr-1.5"></i>練習メニュー</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'reflection' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('reflection')}><i className="fas fa-sync-alt mr-1.5"></i>振り返り</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'roster' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('roster')}><i className="fas fa-id-card mr-1.5"></i>名簿・出欠</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'history' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('history')}><i className="fas fa-history mr-1.5"></i>更新履歴</button>
               </div>
             </div>
           </div>
@@ -600,7 +981,7 @@
                     <h2 className="font-black text-gray-800 text-lg flex items-center"><i className={`fas fa-play-circle mr-2 ${theme.text}`}></i>現在の進行フェーズ（年度途中スタート）</h2>
                     <p className="text-xs text-gray-500 mt-1">ここを設定すると、他のタブを開いた時に自動的にそのグループから開始されます。</p>
                   </div>
-                  <select className={`border-2 ${theme.border} ${theme.text} font-black text-lg p-2 rounded-lg bg-gray-50`} value={activeGroup} onChange={(e) => setActiveGroup(e.target.value)}>
+                  <select disabled={isViewer} className={`border-2 ${theme.border} ${theme.text} font-black text-lg p-2 rounded-lg bg-gray-50 disabled:opacity-60`} value={currentData.activeGroup || 'A'} onChange={(e) => updateActiveGroup(e.target.value)}>
                     {GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </div>
@@ -636,6 +1017,54 @@
                     </div>
                   </div>
                 </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
+                    <h3 className="font-bold text-gray-800 border-b pb-2 mb-3 text-sm"><i className="fas fa-layer-group text-gray-400 mr-2"></i>グループ別 振り返り進捗</h3>
+                    <div className="space-y-1.5">
+                      {GROUPS.map(g => {
+                        const done = currentData.reflections[g.id] && currentData.reflections[g.id].completed;
+                        return (
+                          <div key={g.id} className="flex items-center gap-2 text-[11px]">
+                            <span className="w-6 font-black text-gray-500">{g.id}</span>
+                            <div className="flex-grow bg-gray-100 rounded-full h-2.5 overflow-hidden">
+                              <div className={`h-2.5 rounded-full ${done ? 'bg-emerald-500' : 'bg-gray-200'}`} style={{width: done ? '100%' : '4%'}}></div>
+                            </div>
+                            <span className={`w-14 text-right font-bold ${done ? 'text-emerald-600' : 'text-gray-400'}`}>{done ? '完了' : '未着手'}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
+                    <h3 className="font-bold text-gray-800 border-b pb-2 mb-3 text-sm"><i className="fas fa-chart-bar text-gray-400 mr-2"></i>年度別 登録大会数（{currentBucket === '共通' ? 'チーム共通' : currentBucket}）</h3>
+                    <div className="flex items-end gap-3 h-28">
+                      {availableYears.map(y => {
+                        const yd = teamData[y] && teamData[y][currentBucket];
+                        const count = yd ? (yd.tournaments || []).length : 0;
+                        const max = Math.max(1, ...availableYears.map(yy => { const d = teamData[yy] && teamData[yy][currentBucket]; return d ? (d.tournaments||[]).length : 0; }));
+                        return (
+                          <div key={y} className="flex flex-col items-center gap-1 flex-grow">
+                            <div className={`w-full rounded-t ${y === actualYear ? theme.bg : 'bg-gray-200'}`} style={{height: `${Math.max(6, (count/max)*100)}px`}}></div>
+                            <span className="text-[10px] font-bold text-gray-500">{y}</span>
+                            <span className="text-[10px] font-black text-gray-700">{count}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
+                  <h3 className="font-bold text-gray-800 border-b pb-2 mb-3 text-sm"><i className="fas fa-share-alt text-gray-400 mr-2"></i>データ活用・共有</h3>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={exportTeamJson} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-file-download mr-1"></i>この年度をJSONで書き出す</button>
+                    <button onClick={exportTournamentsCsv} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-file-csv mr-1"></i>大会一覧をCSVで書き出す</button>
+                    <button onClick={copyPublicLink} className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-link mr-1"></i>保護者向け共有リンクを発行</button>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-2">※共有リンクは大会カレンダー（結果を含む）のみを表示し、育成計画や振り返りなどの内部情報は含まれません。ログイン不要で誰でも閲覧できます。</p>
+                </div>
               </div>
             )}
 
@@ -645,33 +1074,36 @@
                   <h2 className="text-lg font-bold text-gray-800">大会スケジュール（{currentBucket === '共通' ? 'チーム共通' : currentBucket}）</h2>
                   <div className="flex gap-2">
                     <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>{GROUPS.map(g => <option key={g.id} value={g.id}>追加先: {g.id}</option>)}</select>
-                    <button onClick={addTournament} className={`${theme.bg} ${theme.hover} text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-plus mr-1"></i>大会追加</button>
+                    <button onClick={addTournament} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-plus mr-1"></i>大会追加</button>
+                    <button onClick={exportTournamentsCsv} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors"><i className="fas fa-file-csv mr-1"></i>CSV書き出し</button>
                   </div>
                 </div>
                 <div className="overflow-x-auto print-break-inside-avoid">
-                  <table className="w-full text-left border-collapse min-w-[900px]">
+                  <table className="w-full text-left border-collapse min-w-[1000px]">
                     <thead>
                       <tr className="bg-gray-50 text-gray-600 text-xs font-bold border-b">
                         <th className="p-2 w-16 text-center">Grp</th><th className="p-2 w-20">開催月</th><th className="p-2 w-28 text-center">日程</th>
-                        <th className="p-2 w-72">大会名 / カテゴリ</th><th className="p-2">位置付け</th><th className="p-2 w-10 text-center no-print">操作</th>
+                        <th className="p-2 w-64">大会名 / カテゴリ</th><th className="p-2">位置付け</th><th className="p-2 w-48">結果</th><th className="p-2 w-10 text-center no-print">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 text-xs">
                       {currentData.tournaments.map((t, idx) => (
                         <tr key={t.id || idx} className="hover:bg-gray-50 transition-colors">
-                          <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-transparent w-full" value={t.id} onChange={(e) => updateTournament(idx, 'id', e.target.value)}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
-                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-bold text-center bg-transparent" value={t.month} onChange={(e) => updateTournament(idx, 'month', e.target.value)}/></td>
-                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-mono text-center font-bold bg-transparent" value={t.date} onChange={(e) => updateTournament(idx, 'date', e.target.value)}/></td>
+                          <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-transparent w-full" value={t.id} onChange={(e) => updateTournament(idx, 'id', e.target.value)} disabled={isViewer}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
+                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-bold text-center bg-transparent" value={t.month} onChange={(e) => updateTournament(idx, 'month', e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-mono text-center font-bold bg-transparent" value={t.date} onChange={(e) => updateTournament(idx, 'date', e.target.value)} readOnly={isViewer}/></td>
                           <td className="p-2 space-y-1">
-                            <input type="text" className="border rounded p-1 w-full font-bold bg-transparent" value={t.name} onChange={(e) => updateTournament(idx, 'name', e.target.value)}/>
-                            <input type="text" className="border-none p-0.5 w-full text-[10px] text-gray-500 bg-transparent" value={t.category} onChange={(e) => updateTournament(idx, 'category', e.target.value)} placeholder="カテゴリ"/>
+                            <input type="text" className="border rounded p-1 w-full font-bold bg-transparent" value={t.name} onChange={(e) => updateTournament(idx, 'name', e.target.value)} readOnly={isViewer}/>
+                            <input type="text" className="border-none p-0.5 w-full text-[10px] text-gray-500 bg-transparent" value={t.category} onChange={(e) => updateTournament(idx, 'category', e.target.value)} placeholder="カテゴリ" readOnly={isViewer}/>
                           </td>
-                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none bg-transparent leading-relaxed" value={t.target} onChange={(e) => updateTournament(idx, 'target', e.target.value)}/></td>
-                          <td className="p-2 text-center no-print"><button onClick={() => deleteTournament(idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button></td>
+                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none bg-transparent leading-relaxed" value={t.target} onChange={(e) => updateTournament(idx, 'target', e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-emerald-700 resize-none bg-emerald-50 leading-relaxed" placeholder="順位・戦績・結果メモ" value={t.result || ''} onChange={(e) => updateTournamentResult(idx, e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2 text-center no-print">{!isViewer && <button onClick={() => deleteTournament(idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+
                 </div>
               </div>
             )}
@@ -680,32 +1112,33 @@
               <div className="space-y-4 fade-in print-break-inside-avoid">
                 <div className={`bg-white border-t-4 ${theme.border} p-4 rounded-xl shadow-sm transition-colors`}>
                   <label className="text-[10px] text-gray-500 font-bold block mb-1 uppercase tracking-wider">フェーズの位置付け・狙い ({currentBucket === '共通' ? 'チーム共通' : currentBucket})</label>
-                  <textarea className="w-full bg-gray-50 border border-gray-200 rounded p-2 text-xs font-bold text-gray-800 leading-relaxed h-14 bg-transparent" value={currentData.plans[selectedGroup].position} onChange={(e)=>updatePlan('position', e.target.value)}/>
+                  <textarea className="w-full bg-gray-50 border border-gray-200 rounded p-2 text-xs font-bold text-gray-800 leading-relaxed h-14 bg-transparent" value={currentData.plans[selectedGroup].position} onChange={(e)=>updatePlan('position', e.target.value)} readOnly={isViewer}/>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-baseball-ball ${theme.text}`}></i> 後衛: 技術・配球</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].back} onChange={(e)=>updatePlan('back', e.target.value)}/></div>
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-user-shield ${theme.text}`}></i> 前衛: 技術・動き</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].front} onChange={(e)=>updatePlan('front', e.target.value)}/></div>
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-users ${theme.text}`}></i> チーム: 規律・マナー</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].team} onChange={(e)=>updatePlan('team', e.target.value)}/></div>
-                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-layer-group ${theme.text}`}></i> 学年別・習熟度別配慮</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].level} onChange={(e)=>updatePlan('level', e.target.value)}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-baseball-ball ${theme.text}`}></i> 後衛: 技術・配球</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].back} onChange={(e)=>updatePlan('back', e.target.value)} readOnly={isViewer}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-user-shield ${theme.text}`}></i> 前衛: 技術・動き</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].front} onChange={(e)=>updatePlan('front', e.target.value)} readOnly={isViewer}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-users ${theme.text}`}></i> チーム: 規律・マナー</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].team} onChange={(e)=>updatePlan('team', e.target.value)} readOnly={isViewer}/></div>
+                  <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm"><div className="font-bold text-gray-700 text-xs flex items-center gap-1.5 border-b pb-1.5 mb-2"><i className={`fas fa-layer-group ${theme.text}`}></i> 学年別・習熟度別配慮</div><textarea className="w-full h-32 border-none bg-gray-50 rounded p-2 text-xs leading-relaxed resize-none bg-transparent" value={currentData.plans[selectedGroup].level} onChange={(e)=>updatePlan('level', e.target.value)} readOnly={isViewer}/></div>
                 </div>
+                <CommentThread comments={currentData.plans[selectedGroup].comments} onAdd={addPlanComment} onDelete={deletePlanComment} isViewer={isViewer} />
               </div>
             )}
 
             {activeTab === 'practice' && currentData.practices[selectedGroup] && (
               <div className="space-y-4 fade-in print-break-inside-avoid">
                 <div className="flex justify-end mb-2 no-print">
-                  <button onClick={addPractice} className={`${theme.bg} ${theme.hover} text-white font-bold text-xs px-3 py-2 rounded shadow transition-all`}><i className="fas fa-plus mr-1"></i>練習枠を追加</button>
+                  <button onClick={addPractice} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-2 rounded shadow transition-all`}><i className="fas fa-plus mr-1"></i>練習枠を追加</button>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   {currentData.practices[selectedGroup].map((p, idx) => (
                     <div key={p.id} className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col relative group print-break-inside-avoid">
                       <div className="bg-gray-100 px-3 py-2 border-b flex justify-between items-center">
-                        <input type="text" className="bg-transparent font-black text-gray-600 text-xs w-24" value={p.week} onChange={(e)=>updatePractice(idx, 'week', e.target.value)}/>
-                        <button onClick={() => deletePractice(idx)} className="text-gray-400 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity no-print"><i className="fas fa-times"></i></button>
+                        <input type="text" className="bg-transparent font-black text-gray-600 text-xs w-24" value={p.week} onChange={(e)=>updatePractice(idx, 'week', e.target.value)} readOnly={isViewer}/>
+                        {!isViewer && <button onClick={() => deletePractice(idx)} className="text-gray-400 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity no-print"><i className="fas fa-times"></i></button>}
                       </div>
                       <div className="p-3 flex-grow space-y-3 text-xs">
-                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">週間重点テーマ</label><input type="text" className={`w-full border border-gray-200 font-bold rounded p-1.5 ${theme.text} bg-gray-50 bg-transparent`} value={p.theme} onChange={(e)=>updatePractice(idx, 'theme', e.target.value)}/></div>
-                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">練習ドリル・配球内容</label><textarea className="w-full border border-gray-200 rounded p-1.5 h-32 text-gray-700 bg-gray-50 resize-none bg-transparent" value={p.drill} onChange={(e)=>updatePractice(idx, 'drill', e.target.value)}/></div>
+                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">週間重点テーマ</label><input type="text" className={`w-full border border-gray-200 font-bold rounded p-1.5 ${theme.text} bg-gray-50 bg-transparent`} value={p.theme} onChange={(e)=>updatePractice(idx, 'theme', e.target.value)} readOnly={isViewer}/></div>
+                        <div><label className="text-[10px] font-bold text-gray-400 block mb-1">練習ドリル・配球内容</label><textarea className="w-full border border-gray-200 rounded p-1.5 h-32 text-gray-700 bg-gray-50 resize-none bg-transparent" value={p.drill} onChange={(e)=>updatePractice(idx, 'drill', e.target.value)} readOnly={isViewer}/></div>
                       </div>
                     </div>
                   ))}
@@ -718,14 +1151,103 @@
                 <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
                   <h2 className="text-sm font-bold text-gray-800"><i className={`fas fa-sync-alt mr-1.5 ${theme.text}`}></i>大会後 振り返り ({currentBucket === '共通' ? 'チーム共通' : currentBucket})</h2>
                   <label className={`flex items-center space-x-2 text-xs font-bold cursor-pointer border px-3 py-1.5 rounded-lg transition-colors ${currentData.reflections[selectedGroup].completed ? 'bg-rose-50 border-rose-300 text-rose-600' : 'bg-white border-gray-300 text-gray-400'}`}>
-                    <input type="checkbox" checked={currentData.reflections[selectedGroup].completed} onChange={(e) => updateReflection('completed', e.target.checked)} className="form-checkbox text-rose-500 rounded w-4 h-4"/>
+                    <input type="checkbox" disabled={isViewer} checked={currentData.reflections[selectedGroup].completed} onChange={(e) => updateReflection('completed', e.target.checked)} className="form-checkbox text-rose-500 rounded w-4 h-4"/>
                     <span>振り返り完了済</span>
                   </label>
                 </div>
                 <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm space-y-4 text-xs">
-                  <div><label className="block text-sm font-bold text-gray-700 mb-1"><i className={`fas fa-thumbs-up ${theme.text}`}></i> 成果（機能した技術・戦術）</label><textarea value={currentData.reflections[selectedGroup].good} onChange={(e) => updateReflection('good', e.target.value)} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-emerald-400"></textarea></div>
-                  <div><label className="block text-sm font-bold text-gray-700 mb-1"><i className="fas fa-exclamation-triangle text-rose-500"></i> 課題（修正が必要な点）</label><textarea value={currentData.reflections[selectedGroup].bad} onChange={(e) => updateReflection('bad', e.target.value)} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-rose-400"></textarea></div>
-                  <div className="pt-2 border-t border-gray-100"><label className="block text-sm font-bold text-gray-700 mb-1"><i className={`fas fa-long-arrow-alt-right ${theme.text}`}></i> 次の練習メニューへの引継ぎ</label><textarea value={currentData.reflections[selectedGroup].nextAction} onChange={(e) => updateReflection('nextAction', e.target.value)} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-blue-400"></textarea></div>
+                  <div><label className="block text-sm font-bold text-gray-700 mb-1"><i className={`fas fa-thumbs-up ${theme.text}`}></i> 成果（機能した技術・戦術）</label><textarea value={currentData.reflections[selectedGroup].good} onChange={(e) => updateReflection('good', e.target.value)} readOnly={isViewer} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-emerald-400"></textarea></div>
+                  <div><label className="block text-sm font-bold text-gray-700 mb-1"><i className="fas fa-exclamation-triangle text-rose-500"></i> 課題（修正が必要な点）</label><textarea value={currentData.reflections[selectedGroup].bad} onChange={(e) => updateReflection('bad', e.target.value)} readOnly={isViewer} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-rose-400"></textarea></div>
+                  <div className="pt-2 border-t border-gray-100"><label className="block text-sm font-bold text-gray-700 mb-1"><i className={`fas fa-long-arrow-alt-right ${theme.text}`}></i> 次の練習メニューへの引継ぎ</label><textarea value={currentData.reflections[selectedGroup].nextAction} onChange={(e) => updateReflection('nextAction', e.target.value)} readOnly={isViewer} className="w-full border-none bg-gray-50 rounded p-3 min-h-[90px] leading-relaxed resize-none bg-transparent border-l-4 border-l-blue-400"></textarea></div>
+                </div>
+                <CommentThread comments={currentData.reflections[selectedGroup].comments} onAdd={addReflectionComment} onDelete={deleteReflectionComment} isViewer={isViewer} />
+              </div>
+            )}
+
+            {activeTab === 'roster' && (
+              <div className="space-y-6 fade-in">
+                <div className="bg-white p-4 rounded-xl shadow-md space-y-3">
+                  <div className="flex justify-between items-center border-b pb-3 border-gray-100 no-print">
+                    <h2 className="text-lg font-bold text-gray-800">選手名簿（{currentBucket === '共通' ? 'チーム共通' : currentBucket}）</h2>
+                    <button onClick={addPlayer} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-user-plus mr-1"></i>選手を追加</button>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-[700px]">
+                      <thead><tr className="bg-gray-50 text-gray-600 text-xs font-bold border-b">
+                        <th className="p-2 w-48">氏名</th><th className="p-2 w-24">学年</th><th className="p-2 w-28">ポジション</th><th className="p-2">メモ</th><th className="p-2 w-16 text-center">在籍</th><th className="p-2 w-10 text-center no-print">操作</th>
+                      </tr></thead>
+                      <tbody className="divide-y divide-gray-100 text-xs">
+                        {(currentData.roster || []).map((p, idx) => (
+                          <tr key={p.id} className="hover:bg-gray-50">
+                            <td className="p-2"><input value={p.name} onChange={e=>updatePlayer(idx,'name',e.target.value)} readOnly={isViewer} className="border rounded p-1 w-full font-bold bg-transparent"/></td>
+                            <td className="p-2"><input value={p.grade} onChange={e=>updatePlayer(idx,'grade',e.target.value)} readOnly={isViewer} placeholder="例: 2年" className="border rounded p-1 w-full bg-transparent"/></td>
+                            <td className="p-2">
+                              <select value={p.position} onChange={e=>updatePlayer(idx,'position',e.target.value)} disabled={isViewer} className="border rounded p-1 w-full bg-transparent">
+                                <option value="後衛">後衛</option><option value="前衛">前衛</option><option value="両方">両方</option>
+                              </select>
+                            </td>
+                            <td className="p-2"><input value={p.note} onChange={e=>updatePlayer(idx,'note',e.target.value)} readOnly={isViewer} className="border rounded p-1 w-full bg-transparent"/></td>
+                            <td className="p-2 text-center">
+                              <input type="checkbox" checked={p.active !== false} disabled={isViewer} onChange={e=>updatePlayer(idx,'active',e.target.checked)} />
+                            </td>
+                            <td className="p-2 text-center no-print">{!isViewer && <button onClick={() => deletePlayer(idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>}</td>
+                          </tr>
+                        ))}
+                        {(currentData.roster || []).length === 0 && <tr><td colSpan="6" className="p-4 text-center text-gray-400">選手が登録されていません</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="bg-white p-4 rounded-xl shadow-md space-y-3">
+                  <div className="flex justify-between items-center border-b pb-3 border-gray-100 no-print">
+                    <h2 className="text-lg font-bold text-gray-800">出欠管理</h2>
+                    <button onClick={addSession} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-calendar-plus mr-1"></i>練習日を追加</button>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-[700px]">
+                      <thead><tr className="bg-gray-50 text-gray-600 text-xs font-bold border-b">
+                        <th className="p-2 w-40 sticky left-0 bg-gray-50">選手 ＼ 練習日</th>
+                        {(currentData.sessions || []).map((s, sIdx) => (
+                          <th key={s.id} className="p-2 w-28">
+                            <input type="date" value={s.date} onChange={e=>updateSessionField(sIdx,'date',e.target.value)} readOnly={isViewer} className="border rounded p-1 w-full text-[10px] bg-transparent"/>
+                            <input value={s.note} onChange={e=>updateSessionField(sIdx,'note',e.target.value)} readOnly={isViewer} placeholder="メモ" className="border rounded p-1 w-full text-[10px] mt-1 bg-transparent font-normal"/>
+                            {!isViewer && <button onClick={() => deleteSession(sIdx)} className="text-gray-400 hover:text-red-500 text-[10px] mt-1 no-print"><i className="fas fa-trash-alt"></i></button>}
+                          </th>
+                        ))}
+                      </tr></thead>
+                      <tbody className="divide-y divide-gray-100 text-xs">
+                        {(currentData.roster || []).map((p) => (
+                          <tr key={p.id} className="hover:bg-gray-50">
+                            <td className="p-2 font-bold sticky left-0 bg-white">{p.name}</td>
+                            {(currentData.sessions || []).map((s, sIdx) => (
+                              <td key={s.id} className="p-2 text-center">
+                                <input type="checkbox" disabled={isViewer} checked={!!s.attendance[p.id]} onChange={() => toggleAttendance(sIdx, p.id)} />
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                        {(currentData.roster || []).length === 0 && <tr><td className="p-4 text-center text-gray-400">先に選手を登録してください</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                  {(currentData.sessions || []).length === 0 && <p className="text-xs text-gray-400">練習日がまだ登録されていません。「練習日を追加」から作成してください。</p>}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'history' && (
+              <div className="bg-white p-4 rounded-xl shadow-md space-y-3 fade-in">
+                <h2 className="text-lg font-bold text-gray-800 border-b pb-3 border-gray-100"><i className="fas fa-history mr-2 text-gray-400"></i>更新履歴（{currentTeam}）</h2>
+                <div className="divide-y divide-gray-100">
+                  {activityLog.map(a => (
+                    <div key={a.id} className="py-2 flex justify-between items-center text-xs">
+                      <span className="font-bold text-gray-700">{a.updatedBy || '?'}</span>
+                      <span className="text-gray-400">{a.bucket === '共通' ? 'チーム共通' : a.bucket} / {a.year}年度</span>
+                      <span className="text-gray-400">{a.updatedAt && a.updatedAt.toDate ? a.updatedAt.toDate().toLocaleString('ja-JP') : ''}</span>
+                    </div>
+                  ))}
+                  {activityLog.length === 0 && <p className="text-xs text-gray-400 py-4 text-center">まだ更新履歴がありません。</p>}
                 </div>
               </div>
             )}
@@ -735,7 +1257,61 @@
     };
 
     // ================= 全体のルーティング（ログイン状態管理） =================
+    // ================= 保護者向け 公開カレンダー（ログイン不要） =================
+    const PublicCalendarView = ({ teamName }) => {
+      const [data, setData] = useState(undefined); // undefined=読込中, null=無し
+      useEffect(() => {
+        const unsub = db.collection('publicCalendars').doc(teamName).onSnapshot(
+          doc => setData(doc.exists ? doc.data() : null),
+          () => setData(null)
+        );
+        return unsub;
+      }, [teamName]);
+
+      if (data === undefined) {
+        return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white"><div className="loader mb-4"></div></div>;
+      }
+      if (!data) {
+        return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white p-4 text-center"><p className="font-bold text-sm">このチームの公開カレンダーはまだ準備されていません。</p></div>;
+      }
+      const tournaments = data.tournaments || {};
+      const buckets = Object.keys(tournaments).filter(b => (tournaments[b] || []).length);
+      return (
+        <div className="min-h-screen bg-gray-100">
+          <div className="bg-slate-900 text-white py-5 px-4 text-center">
+            <span className="bg-blue-600 text-white text-[10px] font-black px-2 py-0.5 rounded uppercase">KST SYSTEM</span>
+            <h1 className="text-xl font-black mt-2">{teamName} 大会カレンダー（保護者向け公開ページ）</h1>
+            <p className="text-[11px] text-slate-400 mt-1">閲覧専用ページです。育成計画などの内部情報は含まれません。</p>
+          </div>
+          <div className="max-w-3xl mx-auto p-4 space-y-6">
+            {buckets.length === 0 && <p className="text-center text-gray-400 text-sm py-10">まだ大会情報が登録されていません。</p>}
+            {buckets.map(b => (
+              <div key={b} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="bg-gray-50 px-4 py-2 font-black text-sm text-gray-700 border-b">{b === '共通' ? 'チーム共通' : b}</div>
+                <div className="divide-y divide-gray-100">
+                  {tournaments[b].map((t, i) => (
+                    <div key={i} className="p-3 text-sm flex flex-col sm:flex-row sm:items-center gap-2">
+                      <span className="font-black text-blue-600 w-20 shrink-0">{t.month} {t.date && t.date !== '日程確定後記入' ? `(${t.date})` : ''}</span>
+                      <div className="flex-grow">
+                        <div className="font-bold text-gray-800">{t.name} {t.category && <span className="text-[10px] text-gray-400">（{t.category}）</span>}</div>
+                        {t.result && <div className="text-emerald-600 text-xs font-bold mt-1"><i className="fas fa-trophy mr-1"></i>{t.result}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
     const Root = () => {
+      const publicParams = new URLSearchParams(window.location.search);
+      if (publicParams.get('public') === '1' && publicParams.get('team')) {
+        return <PublicCalendarView teamName={publicParams.get('team')} />;
+      }
+
       const [authUser, setAuthUser] = useState(undefined); // undefined=判定中, null=未ログイン
       const [profile, setProfile] = useState(null);
       const [route, setRoute] = useState('app');
@@ -786,7 +1362,7 @@
         );
       }
 
-      if (route === 'admin' && profile.role === 'admin') {
+      if (route === 'admin' && normalizeRole(profile.role) === 'admin') {
         return <AdminPage profile={profile} onBack={() => setRoute('app')} />;
       }
 
