@@ -963,7 +963,12 @@
 
       const updateStore = (updater) => {
         if (isViewer) return; // 閲覧のみ権限では保存させない
-        setHistory(prev => [...prev.slice(-9), globalStore]);
+        // undo履歴には「今回変更するバケツの変更前データ」だけを保存する。
+        // 以前は編集のたびにglobalStore全体（全チーム・全年度・写真データ含む）を
+        // 丸ごとコピーしていたため、キー入力ごとに重い処理が走り、日本語入力の
+        // 変換がおかしくなる原因になっていた。
+        const beforeBucket = normalizeBucketData(globalStore[currentTeam][actualYear][currentBucket]);
+        setHistory(h => [...h.slice(-9), { team: currentTeam, year: actualYear, bucket: currentBucket, data: beforeBucket }]);
         setGlobalStore(prev => {
           const prevYears = prev[currentTeam][actualYear];
           const normalizedBucket = normalizeBucketData(prevYears[currentBucket]);
@@ -1017,10 +1022,15 @@
       const handleUndo = () => {
         if (isViewer) return;
         if (history.length === 0) return;
-        const prevState = history[history.length - 1];
-        setGlobalStore(prevState);
+        const last = history[history.length - 1];
         setHistory(prev => prev.slice(0, -1));
-        persist(currentTeam, prevState[currentTeam]);
+        setGlobalStore(prev => {
+          const prevYears = prev[last.team][last.year];
+          const newYears = { ...prevYears, [last.bucket]: last.data };
+          const newTeamYears = { ...prev[last.team], [last.year]: newYears };
+          persist(last.team, newTeamYears);
+          return { ...prev, [last.team]: newTeamYears };
+        });
       };
 
       // チームの新規作成・名称変更・削除は管理者ページに集約（誤操作防止のため）
@@ -1037,7 +1047,7 @@
           // 新年度作成時だけ、現在年度のグループ名を初期値として引き継ぐ（作成後は年度ごとに独立）
           newYearData.groupSettings = { ...(teamData[actualYear].groupSettings || legacyGroupSettings || {}) };
           const newTeamYears = { ...teamData, [nextYear]: newYearData };
-          setHistory(prev => [...prev, globalStore]);
+          // 年度作成は履歴に積まない（構造が異なるため。誤操作は個別の確認ダイアログで防止）
           setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
           persist(currentTeam, newTeamYears);
           setCurrentYear(nextYear);
@@ -1059,7 +1069,7 @@
           newYearData.groupSettings = { ...(teamData[actualYear].groupSettings || legacyGroupSettings || {}) };
         }
         const newTeamYears = { ...teamData, [label]: newYearData };
-        setHistory(prev => [...prev, globalStore]);
+        // 年度の追加・名称変更・削除は履歴に積まない（構造が異なるため。個別の確認ダイアログで防止）
         setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
         persist(currentTeam, newTeamYears);
         setCurrentYear(label);
@@ -1072,7 +1082,7 @@
         const newTeamYears = { ...teamData };
         newTeamYears[newYear] = newTeamYears[oldYear];
         delete newTeamYears[oldYear];
-        setHistory(prev => [...prev, globalStore]);
+        // 年度の追加・名称変更・削除は履歴に積まない（構造が異なるため。個別の確認ダイアログで防止）
         setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
         persist(currentTeam, newTeamYears);
         if (actualYear === oldYear) setCurrentYear(newYear);
@@ -1083,7 +1093,7 @@
         if (!window.confirm(`${year}年度のデータを完全に削除します。元に戻せません。本当に削除しますか？`)) return;
         const newTeamYears = { ...teamData };
         delete newTeamYears[year];
-        setHistory(prev => [...prev, globalStore]);
+        // 年度の追加・名称変更・削除は履歴に積まない（構造が異なるため。個別の確認ダイアログで防止）
         setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
         persist(currentTeam, newTeamYears);
         if (actualYear === year) {
