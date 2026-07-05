@@ -849,6 +849,8 @@
 
       // ---- 通知: 他の指導者が今のチームを更新したら軽く知らせる ----
       const [toast, setToast] = useState(null);
+      const [photoUploading, setPhotoUploading] = useState(null); // アップロード中のtournament idx
+      const [gameDayId, setGameDayId] = useState(null); // 大会当日モードで選択中の大会id
       const seenMetaRef = useRef({});
       useEffect(() => {
         const m = lastMeta[currentTeam];
@@ -905,7 +907,7 @@
             const tournamentsByBucket = {};
             BUCKETS.forEach(b => {
               tournamentsByBucket[b] = ((yearBuckets[b] && yearBuckets[b].tournaments) || []).map(t => ({
-                group: inferTournamentGroup(t), month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || '', eventType: t.eventType || guessEventType(t), place: t.place || '', meeting: t.meeting || '', belongings: t.belongings || '', notice: t.notice || '', parentVisible: t.parentVisible !== false
+                group: inferTournamentGroup(t), month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || '', eventType: t.eventType || guessEventType(t), place: t.place || '', meeting: t.meeting || '', belongings: t.belongings || '', notice: t.notice || '', parentVisible: t.parentVisible !== false, photoUrl: t.photoUrl || ''
               }));
             });
             db.collection('publicCalendars').doc(teamName).set({
@@ -1021,6 +1023,63 @@
         }
       };
 
+      // ---- 保護者連絡用メッセージ（LINE等にそのまま貼れる文章） ----
+      const buildParentMessage = (t) => {
+        if (!t) return '';
+        const lines = [`【${t.name || '大会'}】`];
+        const dateLine = `${t.month || ''} ${t.date && t.date !== '日程確定後記入' ? t.date : ''}`.trim();
+        if (dateLine) lines.push(dateLine);
+        if (t.place) lines.push(`場所：${t.place}`);
+        if (t.meeting) lines.push(`集合：${t.meeting}`);
+        if (t.belongings) lines.push(`持ち物：${t.belongings}`);
+        if (t.notice) lines.push(`連絡事項：${t.notice}`);
+        return lines.join('\n');
+      };
+      const copyParentMessage = async (t) => {
+        const text = buildParentMessage(t);
+        try {
+          await navigator.clipboard.writeText(text);
+          alert('コピーしました。LINE等に貼り付けてください。');
+        } catch (e) {
+          prompt('このテキストをコピーしてください:', text);
+        }
+      };
+
+      // ---- 写真1枚添付（大会・活動の様子） ----
+      // ※ Firebase Storageを別途セットアップしなくても使えるように、
+      //   ブラウザ側で縮小・圧縮してからFirestoreに直接保存する（1文書1MBの上限に収めるため）
+      const uploadTournamentPhoto = (idx, file) => {
+        if (!file || isViewer) return;
+        setPhotoUploading(idx);
+        const reader = new FileReader();
+        reader.onload = () => {
+          const img = new Image();
+          img.onload = () => {
+            const maxW = 640;
+            const scale = Math.min(1, maxW / img.width);
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(img.width * scale));
+            canvas.height = Math.max(1, Math.round(img.height * scale));
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+            if (dataUrl.length > 700000) {
+              alert('写真の圧縮後もサイズが大きすぎます。別の写真をお試しください。');
+            } else {
+              updateTournament(idx, 'photoDataUrl', dataUrl);
+            }
+            setPhotoUploading(null);
+          };
+          img.onerror = () => { alert('写真の読み込みに失敗しました。'); setPhotoUploading(null); };
+          img.src = reader.result;
+        };
+        reader.onerror = () => { alert('写真の読み込みに失敗しました。'); setPhotoUploading(null); };
+        reader.readAsDataURL(file);
+      };
+      const removeTournamentPhoto = (idx) => {
+        updateTournament(idx, 'photoDataUrl', '');
+      };
+
 
       // ---- 便利機能: 日付・種別・未入力チェック ----
       const guessEventType = (t) => {
@@ -1049,6 +1108,7 @@
       };
       const datedEvents = (currentData.tournaments || []).map((t, idx) => ({...t, idx, parsedDate: parseEventDate(t), type: t.eventType || guessEventType(t)}));
       const today = new Date(); today.setHours(0,0,0,0);
+      const todayISO = today.toISOString().slice(0,10);
       const upcomingEvents = datedEvents.filter(e => e.parsedDate && e.parsedDate >= today).sort((a,b)=>a.parsedDate-b.parsedDate);
       const nextEvent = upcomingEvents[0] || null;
       const daysToNext = nextEvent ? Math.ceil((nextEvent.parsedDate - today) / 86400000) : null;
@@ -1067,6 +1127,14 @@
       const monthLabels = ['4月','5月','6月','7月','8月','9月','10月','11月','12月','1月','2月','3月'];
       const eventsByMonth = monthLabels.map(label => ({ label, events: datedEvents.filter(e => String(e.month || '').includes(label.replace('月','')) || String(e.month || '') === label) }));
       const updateTournamentExtra = (idx, field, value) => updateTournament(idx, field, value);
+
+      // ---- 練習中モード：今日の出欠セッションを探す（無ければ「開始」ボタンで作成） ----
+      const todaysSessionIdx = (currentData.sessions || []).findIndex(s => s.date === todayISO);
+
+      // ---- 大会当日モード：デフォルトで選ぶ大会（直近予定 → 先頭） ----
+      const gameDayIdx = currentData.tournaments.findIndex(t => t.id === (gameDayId || (nextEvent && nextEvent.id) || (currentData.tournaments[0] && currentData.tournaments[0].id)));
+      const gameDayTournament = gameDayIdx >= 0 ? currentData.tournaments[gameDayIdx] : null;
+
       const themeConfig = {
         '男子': { bg: 'bg-blue-600', hover: 'hover:bg-blue-500', text: 'text-blue-500', border: 'border-blue-500', dashBg: 'from-blue-600 to-blue-800' },
         '女子': { bg: 'bg-pink-500', hover: 'hover:bg-pink-400', text: 'text-pink-500', border: 'border-pink-500', dashBg: 'from-pink-500 to-pink-700' },
@@ -1131,6 +1199,8 @@
 
               <div className="flex overflow-x-auto whitespace-nowrap scrollbar-hide flex-grow">
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'dashboard' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('dashboard')}><i className="fas fa-home mr-1.5"></i>HOME</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'liveSession' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('liveSession')}><i className="fas fa-running mr-1.5"></i>練習中モード</button>
+                <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'gameDay' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('gameDay')}><i className="fas fa-trophy mr-1.5"></i>大会当日モード</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'calendar' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('calendar')}><i className="fas fa-calendar-alt mr-1.5"></i>カレンダー</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'parent' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('parent')}><i className="fas fa-mobile-alt mr-1.5"></i>保護者表示</button>
                 <button className={`py-3 px-5 text-xs font-black tracking-wide border-b-2 transition-all ${activeTab === 'plan' ? `border-white text-white bg-slate-800` : 'border-transparent text-slate-400 hover:text-white'}`} onClick={() => setActiveTab('plan')}><i className="fas fa-bullseye mr-1.5"></i>育成計画</button>
@@ -1156,6 +1226,95 @@
                     {groupList.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </div>
+              </div>
+            )}
+
+            {/* ================= 練習中モード ================= */}
+            {activeTab === 'liveSession' && (
+              <div className="space-y-4 fade-in">
+                <div className={`rounded-2xl p-6 text-white shadow-xl bg-gradient-to-br ${theme.dashBg}`}>
+                  <div className="text-xs font-black opacity-80 mb-1"><i className="fas fa-bullseye mr-1.5"></i>今週のテーマ</div>
+                  <div className="text-3xl font-black leading-tight">{thisWeekPractice.theme || 'テーマ未入力'}</div>
+                  <div className="text-base mt-3 opacity-90 whitespace-pre-wrap">{thisWeekPractice.drill || '練習メニューを入力してください。'}</div>
+                </div>
+
+                <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-lg font-black text-gray-800"><i className="fas fa-clipboard-check mr-2 text-emerald-500"></i>今日の出欠</h2>
+                    {todaysSessionIdx < 0 && !isViewer && (
+                      <button onClick={addSession} className={`${theme.bg} ${theme.hover} text-white font-bold text-sm px-4 py-2.5 rounded-lg`}><i className="fas fa-play mr-1.5"></i>今日の出欠を開始</button>
+                    )}
+                  </div>
+                  {todaysSessionIdx < 0 ? (
+                    <p className="text-sm text-gray-400">まだ今日の出欠が始まっていません。上のボタンで開始してください。</p>
+                  ) : (currentData.roster || []).length === 0 ? (
+                    <p className="text-sm text-gray-400">選手が登録されていません。「名簿・出欠」タブから選手を追加してください。</p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {currentData.roster.map(p => {
+                        const present = !!currentData.sessions[todaysSessionIdx].attendance[p.id];
+                        return (
+                          <button key={p.id} onClick={() => !isViewer && toggleAttendance(todaysSessionIdx, p.id)} className={`flex items-center justify-between text-left px-4 py-3.5 rounded-xl border-2 font-bold text-base transition-colors ${present ? 'bg-emerald-50 border-emerald-400 text-emerald-700' : 'bg-gray-50 border-gray-200 text-gray-400'}`}>
+                            <span>{p.name}</span>
+                            <i className={`fas ${present ? 'fa-check-circle text-emerald-500' : 'fa-circle text-gray-300'} text-xl`}></i>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ================= 大会当日モード ================= */}
+            {activeTab === 'gameDay' && (
+              <div className="space-y-4 fade-in">
+                <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-5">
+                  <label className="text-xs font-black text-gray-500 block mb-2">大会を選択</label>
+                  <select value={gameDayTournament ? gameDayTournament.id : ''} onChange={e => setGameDayId(e.target.value)} className="w-full border-2 border-gray-300 rounded-xl p-3 text-base font-bold">
+                    {currentData.tournaments.map(t => <option key={t.id} value={t.id}>{t.month} {t.date} - {t.name}</option>)}
+                  </select>
+                </div>
+
+                {gameDayTournament && (
+                  <>
+                    <div className={`rounded-2xl p-6 text-white shadow-xl bg-gradient-to-br ${theme.dashBg}`}>
+                      <div className="text-xs font-black opacity-80">{gameDayTournament.month} {gameDayTournament.date}</div>
+                      <div className="text-2xl font-black mt-1">{gameDayTournament.name}</div>
+                      {(gameDayTournament.place || gameDayTournament.meeting) && <div className="text-sm mt-2 opacity-90">{gameDayTournament.place} {gameDayTournament.meeting && `/ 集合 ${gameDayTournament.meeting}`}</div>}
+                    </div>
+
+                    <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-5">
+                      <label className="text-sm font-black text-gray-700 block mb-2"><i className="fas fa-trophy text-amber-500 mr-1.5"></i>結果（順位・戦績・メモ）</label>
+                      <textarea
+                        value={gameDayTournament.result || ''}
+                        onChange={(e) => updateTournamentResult(gameDayIdx, e.target.value)}
+                        readOnly={isViewer}
+                        placeholder="例：ベスト8 / 2勝1敗 / 準決勝で惜敗"
+                        className="w-full border-2 border-emerald-200 bg-emerald-50 rounded-xl p-4 text-lg font-bold text-emerald-800 min-h-[120px] leading-relaxed"
+                      />
+                      {showSaveMessage && <p className="text-xs font-bold text-emerald-600 mt-2"><i className="fas fa-check mr-1"></i>保存しました</p>}
+                    </div>
+
+                    <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-5">
+                      <label className="text-sm font-black text-gray-700 block mb-2"><i className="fas fa-camera text-blue-500 mr-1.5"></i>写真（1枚）</label>
+                      {gameDayTournament.photoDataUrl ? (
+                        <div className="space-y-2">
+                          <img src={gameDayTournament.photoDataUrl} alt="大会の様子" className="w-full max-h-72 object-cover rounded-xl border border-gray-200" />
+                          {!isViewer && <button onClick={() => removeTournamentPhoto(gameDayIdx)} className="text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded"><i className="fas fa-trash-alt mr-1"></i>写真を削除</button>}
+                        </div>
+                      ) : (
+                        !isViewer && (
+                          <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-gray-300 rounded-xl p-8 text-gray-400 cursor-pointer hover:border-blue-400 hover:text-blue-500">
+                            <i className="fas fa-camera text-2xl"></i>
+                            <span className="text-sm font-bold">{photoUploading === gameDayIdx ? '読み込み中...' : 'タップして写真を選択'}</span>
+                            <input type="file" accept="image/*" className="hidden" onChange={e => e.target.files[0] && uploadTournamentPhoto(gameDayIdx, e.target.files[0])} />
+                          </label>
+                        )
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -1311,11 +1470,11 @@
                   ))}
                 </div>
                 <div className="overflow-x-auto print-break-inside-avoid">
-                  <table className="w-full text-left border-collapse min-w-[1000px]">
+                  <table className="w-full text-left border-collapse min-w-[1100px]">
                     <thead>
                       <tr className="bg-gray-50 text-gray-600 text-xs font-bold border-b">
                         <th className="p-2 w-16 text-center">Grp</th><th className="p-2 w-20">開催月</th><th className="p-2 w-28 text-center">日程</th>
-                        <th className="p-2 w-64">大会名 / カテゴリ</th><th className="p-2">位置付け</th><th className="p-2 w-40">保護者情報</th><th className="p-2 w-48">結果</th><th className="p-2 w-10 text-center no-print">操作</th>
+                        <th className="p-2 w-64">大会名 / カテゴリ</th><th className="p-2">位置付け</th><th className="p-2 w-40">保護者情報</th><th className="p-2 w-48">結果</th><th className="p-2 w-28">写真</th><th className="p-2 w-10 text-center no-print">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 text-xs">
@@ -1336,8 +1495,22 @@
                             <input value={t.belongings || ''} onChange={e=>updateTournamentExtra(idx,'belongings',e.target.value)} readOnly={isViewer} placeholder="持ち物" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
                             <textarea value={t.notice || ''} onChange={e=>updateTournamentExtra(idx,'notice',e.target.value)} readOnly={isViewer} placeholder="連絡事項" className="border rounded p-1 w-full h-10 text-[10px] bg-transparent resize-none"></textarea>
                             <label className="flex items-center gap-1 text-[10px] text-gray-500 font-bold"><input type="checkbox" checked={t.parentVisible !== false} onChange={e=>updateTournamentExtra(idx,'parentVisible',e.target.checked)} disabled={isViewer}/>保護者表示</label>
+                            {!isViewer && <button onClick={() => copyParentMessage(t)} className="text-[10px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded w-full"><i className="fas fa-copy mr-1"></i>LINE用にコピー</button>}
                           </td>
                           <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-emerald-700 resize-none bg-emerald-50 leading-relaxed" placeholder="順位・戦績・結果メモ" value={t.result || ''} onChange={(e) => updateTournamentResult(idx, e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2">
+                            {t.photoDataUrl ? (
+                              <div className="space-y-1">
+                                <img src={t.photoDataUrl} alt="" className="w-full h-16 object-cover rounded border border-gray-200"/>
+                                {!isViewer && <button onClick={() => removeTournamentPhoto(idx)} className="text-[10px] font-bold text-rose-600 w-full">削除</button>}
+                              </div>
+                            ) : !isViewer && (
+                              <label className="flex flex-col items-center justify-center gap-1 border border-dashed border-gray-300 rounded p-2 text-gray-400 cursor-pointer text-[10px] h-16">
+                                <i className="fas fa-camera"></i>{photoUploading === idx ? '読込中' : '写真追加'}
+                                <input type="file" accept="image/*" className="hidden" onChange={e => e.target.files[0] && uploadTournamentPhoto(idx, e.target.files[0])} />
+                              </label>
+                            )}
+                          </td>
                           <td className="p-2 text-center no-print">{!isViewer && <button onClick={() => deleteTournament(idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>}</td>
                         </tr>
                       ))}
@@ -1359,20 +1532,27 @@
                   <div className="p-4 space-y-3">
                     {nextEvent && (
                       <div className="border border-blue-100 bg-blue-50 rounded-xl p-4">
-                        <div className="text-[11px] font-black text-blue-500 mb-1">次回活動</div>
-                        <div className="text-xl font-black text-gray-800">{nextEvent.name}</div>
-                        <div className="text-sm font-bold text-gray-600 mt-1">{nextEvent.month} {nextEvent.date} / {nextEvent.place || '場所未入力'} / 集合 {nextEvent.meeting || '未入力'}</div>
+                        <div className="flex justify-between items-start gap-2">
+                          <div>
+                            <div className="text-[11px] font-black text-blue-500 mb-1">次回活動</div>
+                            <div className="text-xl font-black text-gray-800">{nextEvent.name}</div>
+                            <div className="text-sm font-bold text-gray-600 mt-1">{nextEvent.month} {nextEvent.date} / {nextEvent.place || '場所未入力'} / 集合 {nextEvent.meeting || '未入力'}</div>
+                          </div>
+                          <button onClick={() => copyParentMessage(nextEvent)} className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-3 py-2 rounded whitespace-nowrap no-print"><i className="fas fa-copy mr-1"></i>LINE用にコピー</button>
+                        </div>
                         {nextEvent.belongings && <div className="text-xs mt-2"><span className="font-black">持ち物：</span>{nextEvent.belongings}</div>}
                         {nextEvent.notice && <div className="text-xs mt-2 bg-white border border-blue-100 rounded p-2 whitespace-pre-wrap"><span className="font-black">連絡事項：</span>{nextEvent.notice}</div>}
+                        {nextEvent.photoDataUrl && <img src={nextEvent.photoDataUrl} alt="" className="w-full max-h-56 object-cover rounded-lg mt-2 border border-blue-100"/>}
                       </div>
                     )}
                     <div className="divide-y divide-gray-100">
                       {(currentData.tournaments || []).filter(t => t.parentVisible !== false).map((t, idx) => (
-                        <div key={t.id || idx} className="py-3 grid grid-cols-1 md:grid-cols-5 gap-2 text-sm">
+                        <div key={t.id || idx} className="py-3 grid grid-cols-1 md:grid-cols-6 gap-2 text-sm items-start">
                           <div className="font-black text-blue-600">{t.month}<br/><span className="text-xs text-gray-500">{t.date}</span></div>
                           <div className="md:col-span-2"><div className="font-black text-gray-800">{t.name}</div><div className="text-[11px] text-gray-400">{t.eventType || guessEventType(t)} / {t.category}</div></div>
                           <div className="text-xs text-gray-600">{t.place || '場所未入力'}<br/>集合：{t.meeting || '未入力'}</div>
                           <div className="text-xs text-gray-600 whitespace-pre-wrap">{t.notice || t.belongings || '連絡事項なし'}</div>
+                          <div className="no-print"><button onClick={() => copyParentMessage(t)} className="text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 px-2 py-1.5 rounded w-full"><i className="fas fa-copy mr-1"></i>コピー</button></div>
                         </div>
                       ))}
                     </div>
