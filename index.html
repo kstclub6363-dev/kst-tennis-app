@@ -678,7 +678,8 @@
             {/* ---- アカウント一覧 ---- */}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               <h2 className="font-black text-gray-800 text-sm p-5 pb-3"><i className="fas fa-users text-blue-500 mr-1.5"></i>アカウント一覧</h2>
-              <table className="w-full text-left text-xs">
+              <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs min-w-[640px]">
                 <thead><tr className="bg-gray-50 text-gray-500 font-bold border-y">
                   <th className="p-3">名前</th><th className="p-3">メール</th><th className="p-3">権限</th><th className="p-3">状態</th><th className="p-3">チーム権限</th><th className="p-3">操作</th>
                 </tr></thead>
@@ -745,6 +746,7 @@
                   {users && users.length === 0 && <tr><td colSpan="6" className="p-4 text-center text-gray-400">アカウントがありません</td></tr>}
                 </tbody>
               </table>
+              </div>
             </div>
             <p className="text-[10px] text-gray-400">※「無効化」したアカウントはこのアプリへのログインができなくなります（既にログイン中の場合は次回チェック時に自動的にログアウトされます）。<br/>※「閲覧のみ」権限のアカウントは、許可されたチームのデータを見ることはできますが、編集・保存はできません。</p>
           </div>
@@ -1699,13 +1701,18 @@
 
             {activeTab === 'calendar' && (
               <div className="bg-white p-4 rounded-xl shadow-md space-y-4">
-                <div className="flex justify-between items-center border-b pb-3 border-gray-100 no-print">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 border-b pb-3 border-gray-100 no-print">
                   <h2 className="text-lg font-bold text-gray-800">大会スケジュール（{currentBucket === '共通' ? 'チーム共通' : currentBucket}）</h2>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>{groupList.map(g => <option key={g.id} value={g.id}>追加先: {g.name}</option>)}</select>
                     <button onClick={addTournament} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-plus mr-1"></i>大会追加</button>
                     <button onClick={exportTournamentsCsv} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors"><i className="fas fa-file-csv mr-1"></i>CSV書き出し</button>
                   </div>
+                </div>
+
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-2 no-print">
+                  <label className="text-[11px] font-black text-blue-500 whitespace-nowrap"><i className="fas fa-clock mr-1"></i>通常練習の時間</label>
+                  <input disabled={isViewer} value={currentPublicInfo.defaultSchedule || ''} onChange={e => updatePublicInfo('defaultSchedule', e.target.value)} placeholder="例：月・水・金 16:00〜18:00" className="flex-grow border border-blue-200 rounded-lg p-2 text-xs bg-white"/>
                 </div>
 
                 {(() => {
