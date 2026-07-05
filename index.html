@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KST育成ナビ</title>
+  <meta property="og:title" content="KST育成ナビ">
+  <meta property="og:description" content="KSTクラブ 年間育成・大会管理システム">
+  <meta property="og:type" content="website">
+  <meta name="twitter:title" content="KST育成ナビ">
 
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -759,9 +763,15 @@
       const [history, setHistory] = useState([]);
       const [lastMeta, setLastMeta] = useState({}); // { [team]: {updatedBy, updatedAt} }
 
-      // ローカルで編集中のチームは、リモートからのスナップショット反映を一時停止する
-      // （保存が完了するまで、他コーチの更新で自分の入力中の文字が消えないようにするため）
+      // ローカルで編集中のチームは、リモートからのスナップショット反映を一時停止する。
+      // 以前は「保存処理が完了した瞬間」にこれを解除していたが、そのタイミングと
+      // Firestoreからのエコー（自分の書き込みが返ってくる）が重なると、日本語入力中に
+      // 入力欄の内容が一瞬巻き戻り、IME変換がおかしくなる（例:「テニス」→「テニステニス」）
+      // 原因になっていた。書き込み完了ではなく「最後に編集した時刻」を基準に、
+      // 一定時間（保存デバウンス＋通信往復分の余裕）はスナップショットの反映を保留する。
       const dirtyTeamRef = useRef(null);
+      const lastEditAtRef = useRef({}); // { [team]: timestamp } 最後にこのチームを編集した時刻
+      const EDIT_GRACE_MS = 2500;
       const saveTimerRef = useRef(null);
       const lastSentRef = useRef({}); // { [team]: jsonString } 自分が最後に送った内容（エコー判定用）
       const publicInfoTimerRef = useRef(null);
@@ -789,8 +799,9 @@
               const data = doc.data();
               meta[doc.id] = { updatedBy: data.updatedBy, updatedAt: data.updatedAt };
               publicInfoMap[doc.id] = data.publicInfo || { greeting: '', contact: '', faq: [] };
-              if (doc.id === dirtyTeamRef.current && prev && prev[doc.id]) {
-                store[doc.id] = prev[doc.id]; // 保存待ちの自分の編集内容を優先
+              const recentlyEditingThis = lastEditAtRef.current[doc.id] && (Date.now() - lastEditAtRef.current[doc.id] < EDIT_GRACE_MS);
+              if ((doc.id === dirtyTeamRef.current || recentlyEditingThis) && prev && prev[doc.id]) {
+                store[doc.id] = prev[doc.id]; // 保存待ち・編集直後の自分の内容を優先
               } else {
                 store[doc.id] = data.years;
               }
@@ -963,6 +974,7 @@
 
       const updateStore = (updater) => {
         if (isViewer) return; // 閲覧のみ権限では保存させない
+        lastEditAtRef.current[currentTeam] = Date.now();
         // undo履歴には「今回変更するバケツの変更前データ」だけを保存する。
         // 以前は編集のたびにglobalStore全体（全チーム・全年度・写真データ含む）を
         // 丸ごとコピーしていたため、キー入力ごとに重い処理が走り、日本語入力の
@@ -993,6 +1005,7 @@
       };
       const updatePublicInfo = (field, value) => {
         if (isViewer) return;
+        lastEditAtRef.current[currentTeam] = Date.now();
         const next = { ...currentPublicInfo, [field]: value };
         setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
         persistPublicInfo(next);
@@ -1005,6 +1018,7 @@
       };
       const updateFaqItem = (idx, field, value) => {
         if (isViewer) return;
+        lastEditAtRef.current[currentTeam] = Date.now();
         const arr = [...(currentPublicInfo.faq || [])];
         arr[idx] = { ...arr[idx], [field]: value };
         const next = { ...currentPublicInfo, faq: arr };
