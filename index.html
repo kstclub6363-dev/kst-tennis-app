@@ -834,7 +834,7 @@
             snapshot.forEach(doc => {
               const data = doc.data();
               meta[doc.id] = { updatedBy: data.updatedBy, updatedAt: data.updatedAt };
-              publicInfoMap[doc.id] = data.publicInfo || { greeting: '', contact: '', faq: [] };
+              publicInfoMap[doc.id] = data.publicInfo || { greeting: '', contact: '', faq: [], defaultSchedule: '' };
               const recentlyEditingThis = lastEditAtRef.current[doc.id] && (Date.now() - lastEditAtRef.current[doc.id] < EDIT_GRACE_MS);
               if ((doc.id === dirtyTeamRef.current || recentlyEditingThis) && prev && prev[doc.id]) {
                 store[doc.id] = prev[doc.id]; // 保存待ち・編集直後の自分の内容を優先
@@ -995,7 +995,7 @@
             const tournamentsByBucket = {};
             BUCKETS.forEach(b => {
               tournamentsByBucket[b] = ((yearBuckets[b] && yearBuckets[b].tournaments) || []).map(t => ({
-                group: inferTournamentGroup(t), month: t.month, date: t.date, name: t.name, category: t.category, target: t.target, result: t.result || '', eventType: t.eventType || guessEventType(t), org: t.org || '学校部活', place: t.place || '', meeting: t.meeting || '', belongings: t.belongings || '', notice: t.notice || '', parentVisible: t.parentVisible !== false, photoUrl: t.photoDataUrl || ''
+                group: inferTournamentGroup(t), month: t.month, date: t.date, time: t.time || '', name: t.name, category: t.category, target: t.target, result: t.result || '', eventType: t.eventType || guessEventType(t), org: t.org || '学校部活', place: t.place || '', meeting: t.meeting || '', belongings: t.belongings || '', notice: t.notice || '', parentVisible: t.parentVisible !== false, photoUrl: t.photoDataUrl || ''
               }));
             });
             db.collection('publicCalendars').doc(teamName).set({
@@ -1031,7 +1031,7 @@
       const updateActiveGroup = (value) => updateStore(d => ({ ...d, activeGroup: value }));
 
       // ---- 保護者ページ用のクラブ情報（ごあいさつ・連絡先・FAQ） ----
-      const currentPublicInfo = teamPublicInfoMap[currentTeam] || { greeting: '', contact: '', faq: [] };
+      const currentPublicInfo = teamPublicInfoMap[currentTeam] || { greeting: '', contact: '', faq: [], defaultSchedule: '' };
       const persistPublicInfo = (nextInfo) => {
         if (publicInfoTimerRef.current) clearTimeout(publicInfoTimerRef.current);
         publicInfoTimerRef.current = setTimeout(() => {
@@ -1229,6 +1229,7 @@
         const lines = [`【${t.name || '大会'}】`];
         const dateLine = `${t.month || ''} ${t.date && t.date !== '日程確定後記入' ? t.date : ''}`.trim();
         if (dateLine) lines.push(dateLine);
+        if (t.time) lines.push(`時間：${t.time}`);
         if (t.place) lines.push(`場所：${t.place}`);
         if (t.meeting) lines.push(`集合：${t.meeting}`);
         if (t.belongings) lines.push(`持ち物：${t.belongings}`);
@@ -1530,7 +1531,7 @@
                 {gameDayTournament && (
                   <>
                     <div className={`rounded-2xl p-6 text-white shadow-xl bg-gradient-to-br ${theme.dashBg}`}>
-                      <div className="text-xs font-black opacity-80">{gameDayTournament.month} {gameDayTournament.date}</div>
+                      <div className="text-xs font-black opacity-80">{gameDayTournament.month} {gameDayTournament.date} {gameDayTournament.time && `/ ${gameDayTournament.time}`}</div>
                       <div className="text-2xl font-black mt-1">{gameDayTournament.name}</div>
                       {(gameDayTournament.place || gameDayTournament.meeting) && <div className="text-sm mt-2 opacity-90">{gameDayTournament.place} {gameDayTournament.meeting && `/ 集合 ${gameDayTournament.meeting}`}</div>}
                     </div>
@@ -1724,7 +1725,10 @@
                     <div className="border border-gray-200 rounded-xl p-3">
                       <div className="flex items-center justify-between mb-2 no-print">
                         <button onClick={() => { const i = monthLabels.indexOf(calActiveMonth); setCalendarMonth(monthLabels[(i - 1 + 12) % 12]); }} className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold"><i className="fas fa-chevron-left"></i></button>
-                        <span className="font-black text-gray-800">{calGridYear}年 {calActiveMonth}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-black text-gray-800">{calGridYear}年 {calActiveMonth}</span>
+                          <button onClick={() => setCalendarMonth(monthLabels.find(l => l.replace('月','') === String(todayForCal.getMonth() + 1)))} className={`text-[10px] font-bold px-2 py-1 rounded-full border ${theme.border} ${theme.text} hover:bg-gray-50`}>今日</button>
+                        </div>
                         <button onClick={() => { const i = monthLabels.indexOf(calActiveMonth); setCalendarMonth(monthLabels[(i + 1) % 12]); }} className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold"><i className="fas fa-chevron-right"></i></button>
                       </div>
                       <div className="flex overflow-x-auto gap-1.5 mb-3 pb-1 no-print">
@@ -1786,10 +1790,11 @@
                                       <input value={t.name} onChange={e => updateTournament(idx, 'name', e.target.value)} readOnly={isViewer} className="flex-grow border rounded p-1.5 text-sm font-bold bg-gray-50" placeholder="大会・予定名"/>
                                     </div>
                                     <div className="flex gap-2">
-                                      <input value={t.month} onChange={e => updateTournament(idx, 'month', e.target.value)} readOnly={isViewer} className="w-20 border rounded p-1.5 text-xs bg-gray-50 text-center" placeholder="月"/>
-                                      <input value={t.date} onChange={e => updateTournament(idx, 'date', e.target.value)} readOnly={isViewer} className="w-24 border rounded p-1.5 text-xs bg-gray-50 text-center" placeholder="日程"/>
-                                      <select value={t.eventType || guessEventType(t)} onChange={e => updateTournamentExtra(idx, 'eventType', e.target.value)} disabled={isViewer} className="flex-grow border rounded p-1.5 text-xs bg-gray-50">{EVENT_TYPES.map(et => <option key={et}>{et}</option>)}</select>
+                                      <input value={t.month} onChange={e => updateTournament(idx, 'month', e.target.value)} readOnly={isViewer} className="w-16 border rounded p-1.5 text-xs bg-gray-50 text-center" placeholder="月"/>
+                                      <input value={t.date} onChange={e => updateTournament(idx, 'date', e.target.value)} readOnly={isViewer} className="w-20 border rounded p-1.5 text-xs bg-gray-50 text-center" placeholder="日程"/>
+                                      <input value={t.time || ''} onChange={e => updateTournamentExtra(idx, 'time', e.target.value)} readOnly={isViewer} className="w-24 border rounded p-1.5 text-xs bg-gray-50 text-center" placeholder="例:14:00〜"/>
                                     </div>
+                                    <select value={t.eventType || guessEventType(t)} onChange={e => updateTournamentExtra(idx, 'eventType', e.target.value)} disabled={isViewer} className="w-full border rounded p-1.5 text-xs bg-gray-50">{EVENT_TYPES.map(et => <option key={et}>{et}</option>)}</select>
                                     <div>
                                       <label className="text-[10px] font-bold text-gray-400 block mb-1">主催（学校部活 / 地域クラブ）</label>
                                       <div className="flex gap-1.5">
@@ -1887,6 +1892,11 @@
                     <textarea disabled={isViewer} value={currentPublicInfo.greeting} onChange={e => updatePublicInfo('greeting', e.target.value)} placeholder="例：保護者の皆様へ。当クラブでは○○を大切に指導しています。" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50 min-h-[80px] leading-relaxed"/>
                   </div>
                   <div>
+                    <label className="text-[10px] font-bold text-gray-500 block mb-1">通常練習の時間（曜日・時間帯）</label>
+                    <input disabled={isViewer} value={currentPublicInfo.defaultSchedule || ''} onChange={e => updatePublicInfo('defaultSchedule', e.target.value)} placeholder="例：月・水・金 16:00〜18:00（テスト期間・長期休みはカレンダーの予定を確認）" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50"/>
+                    <p className="text-[10px] text-gray-400 mt-1">毎回の通常練習はカレンダーには入れず、ここに1つだけ設定してください。時間が変わる日（テスト期間・懇談・長期休みなど）だけカレンダーに登録すれば、色だらけにならずに済みます。</p>
+                  </div>
+                  <div>
                     <label className="text-[10px] font-bold text-gray-500 block mb-1">連絡先（メール・LINE等）</label>
                     <input disabled={isViewer} value={currentPublicInfo.contact} onChange={e => updatePublicInfo('contact', e.target.value)} placeholder="例：お問い合わせは kst.club@example.com まで" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50"/>
                   </div>
@@ -1922,7 +1932,7 @@
                           <div>
                             <div className="text-[11px] font-black text-blue-500 mb-1">次回活動</div>
                             <div className="text-xl font-black text-gray-800">{nextEvent.name}</div>
-                            <div className="text-sm font-bold text-gray-600 mt-1">{nextEvent.month} {nextEvent.date} / {nextEvent.place || '場所未入力'} / 集合 {nextEvent.meeting || '未入力'}</div>
+                            <div className="text-sm font-bold text-gray-600 mt-1">{nextEvent.month} {nextEvent.date} {nextEvent.time && `${nextEvent.time} `}/ {nextEvent.place || '場所未入力'} / 集合 {nextEvent.meeting || '未入力'}</div>
                           </div>
                           <button onClick={() => copyParentMessage(nextEvent)} className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-3 py-2 rounded whitespace-nowrap no-print"><i className="fas fa-copy mr-1"></i>LINE用にコピー</button>
                         </div>
@@ -2202,6 +2212,13 @@
           </div>
 
           <div className="max-w-3xl mx-auto p-4 space-y-4">
+            {publicInfo.defaultSchedule && (
+              <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
+                <div className="text-[11px] font-black text-blue-500 mb-1"><i className="fas fa-clock mr-1.5"></i>通常練習の時間</div>
+                <p className="text-sm text-blue-800 font-bold whitespace-pre-wrap leading-relaxed">{publicInfo.defaultSchedule}</p>
+                <p className="text-[10px] text-blue-400 mt-1">※時間が変わる日はカレンダーに個別に表示されます</p>
+              </div>
+            )}
             {publicInfo.greeting && (
               <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
                 <div className="text-[11px] font-black text-gray-400 mb-1"><i className="fas fa-comment-dots mr-1.5"></i>ごあいさつ</div>
@@ -2240,7 +2257,10 @@
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-4">
                   <div className="flex items-center justify-between mb-3">
                     <button onClick={() => { const idx = PUBLIC_MONTH_LABELS.indexOf(activeMonth); setSelectedMonth(PUBLIC_MONTH_LABELS[(idx - 1 + 12) % 12]); }} className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold"><i className="fas fa-chevron-left"></i></button>
-                    <span className="font-black text-gray-800 text-lg">{gridYear}年 {activeMonth}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-black text-gray-800 text-lg">{gridYear}年 {activeMonth}</span>
+                      <button onClick={() => setSelectedMonth(PUBLIC_MONTH_LABELS.find(l => l.replace('月','') === String(today.getMonth() + 1)))} className={`text-[10px] font-bold px-2 py-1 rounded-full border ${theme.border} ${theme.text} hover:bg-gray-50`}>今日</button>
+                    </div>
                     <button onClick={() => { const idx = PUBLIC_MONTH_LABELS.indexOf(activeMonth); setSelectedMonth(PUBLIC_MONTH_LABELS[(idx + 1) % 12]); }} className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold"><i className="fas fa-chevron-right"></i></button>
                   </div>
                   <div className="flex overflow-x-auto gap-1.5 mb-3 pb-1">
@@ -2351,7 +2371,7 @@
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${eventTypeChipClass(t.eventType)}`}>{t.eventType || '大会'}</span>
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ml-1.5 ${orgBadgeClass(t.org)}`}>{t.org === '地域クラブ' ? '地域クラブ' : '学校部活'}</span>
                       <div className="text-lg font-black text-gray-800 mt-1.5">{t.name}</div>
-                      <div className="text-xs text-gray-400 font-bold mt-0.5">{t.month} {t.date && t.date !== '日程確定後記入' ? t.date : '（日程未定）'} {t.category && `/ ${t.category}`}</div>
+                      <div className="text-xs text-gray-400 font-bold mt-0.5">{t.month} {t.date && t.date !== '日程確定後記入' ? t.date : '（日程未定）'} {t.time && `/ ${t.time}`} {t.category && `/ ${t.category}`}</div>
                       {(t.place || t.meeting) && (
                         <div className="bg-gray-50 rounded-lg p-3 mt-2 text-sm space-y-1">
                           {t.place && <div><span className="font-bold text-gray-500">場所：</span>{t.place}</div>}
