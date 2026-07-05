@@ -1118,7 +1118,13 @@
 
       // === データ更新 ===
       const updateTournament = (idx, field, value) => updateStore(d => { const arr = [...d.tournaments]; arr[idx][field] = value; return {...d, tournaments: arr}; });
-      const addTournament = () => updateStore(d => ({...d, tournaments: [...d.tournaments, {id: uid('t'), group: selectedGroup, month:'未定', date:'未定', name:'新規大会', category:'', target:'', result:''}]}));
+      const addTournament = () => {
+        if (isViewer) return;
+        const newIdx = currentData.tournaments.length;
+        updateStore(d => ({...d, tournaments: [...d.tournaments, {id: uid('t'), group: selectedGroup, month:'未定', date:'未定', name:'新規大会', category:'', target:'', result:''}]}));
+        setActiveTab('calendar');
+        setDayModal({ day: null, month: null, idxs: [newIdx] });
+      };
       const addTournamentOnDate = (monthLabel, day) => {
         if (isViewer) return;
         const newIdx = currentData.tournaments.length;
@@ -1729,7 +1735,7 @@
                           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                             <div className="p-4 space-y-4">
                               <div className="flex justify-between items-center">
-                                <span className="text-sm font-black text-gray-700">{dayModal.month} {dayModal.day}日 の予定</span>
+                                <span className="text-sm font-black text-gray-700">{dayModal.day ? `${dayModal.month} ${dayModal.day}日 の予定` : '新しい予定を編集'}</span>
                                 <button onClick={() => setDayModal(null)} className="text-gray-400 hover:text-gray-600 text-lg"><i className="fas fa-times"></i></button>
                               </div>
                               {dayModal.idxs.map(idx => {
@@ -1761,7 +1767,7 @@
                                   </div>
                                 );
                               })}
-                              {!isViewer && (
+                              {!isViewer && dayModal.day && (
                                 <button onClick={() => addTournamentOnDate(dayModal.month, dayModal.day)} className={`w-full ${theme.bg} ${theme.hover} text-white font-bold text-xs px-3 py-2.5 rounded`}><i className="fas fa-plus mr-1"></i>この日にもう1件追加</button>
                               )}
                             </div>
@@ -2074,14 +2080,15 @@
 
     const PublicCalendarView = ({ teamName }) => {
       const [data, setData] = useState(undefined); // undefined=読込中, null=無し
+      const [loadError, setLoadError] = useState(null); // Firestoreエラーコード（権限不足など）
       const [selectedBucket, setSelectedBucket] = useState(null);
       const [selectedMonth, setSelectedMonth] = useState(null); // '4月' 等
       const [detailEvents, setDetailEvents] = useState(null); // クリックした日の予定一覧（モーダル表示用）
 
       useEffect(() => {
         const unsub = db.collection('publicCalendars').doc(teamName).onSnapshot(
-          doc => setData(doc.exists ? doc.data() : null),
-          () => setData(null)
+          doc => { setData(doc.exists ? doc.data() : null); setLoadError(null); },
+          err => { console.error('公開カレンダー読み込みエラー', err); setData(null); setLoadError((err && err.code) || 'unknown'); }
         );
         return unsub;
       }, [teamName]);
@@ -2090,7 +2097,16 @@
         return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white"><div className="loader mb-4"></div></div>;
       }
       if (!data) {
-        return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white p-4 text-center"><p className="font-bold text-sm">このチームの公開カレンダーはまだ準備されていません。</p></div>;
+        return (
+          <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white p-4 text-center gap-2">
+            <p className="font-bold text-sm">このチームの公開カレンダーはまだ準備されていません。</p>
+            {loadError === 'permission-denied' ? (
+              <p className="text-xs text-amber-400 max-w-sm">権限エラーが発生しています。Firestoreのセキュリティルールに publicCalendars の読み取り許可（allow read: if true;）が反映されているか確認してください。</p>
+            ) : (
+              <p className="text-xs text-slate-400 max-w-sm">このチームでまだ一度も大会情報が保存されていない可能性があります。アプリ側で一度大会情報を編集・保存すると、このページにも表示されるようになります。</p>
+            )}
+          </div>
+        );
       }
 
       const year = data.year || String(new Date().getFullYear());
