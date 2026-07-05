@@ -861,6 +861,8 @@
       const [gameDayId, setGameDayId] = useState(null); // 大会当日モードで選択中の大会id
       const [calendarMonth, setCalendarMonth] = useState(null); // カレンダータブで表示中の月
       const [dayModal, setDayModal] = useState(null); // { day, month, idxs } タップした日の予定編集
+      const [yearMgmtOpen, setYearMgmtOpen] = useState(false);
+      const [newYearInput, setNewYearInput] = useState('');
       const [lastSeenMap, setLastSeenMap] = useState(() => {
         try { return JSON.parse(localStorage.getItem('kst_notif_seen') || '{}'); } catch (e) { return {}; }
       });
@@ -1039,6 +1041,54 @@
           setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
           persist(currentTeam, newTeamYears);
           setCurrentYear(nextYear);
+        }
+      };
+
+      // ---- 年度管理（任意の年度を追加／名称変更／削除） ----
+      const addCustomYear = (yearLabel, carryOver) => {
+        if (isViewer) return;
+        const label = String(yearLabel || '').trim();
+        if (!label) { alert('年度を入力してください。'); return; }
+        if (teamData[label]) { alert('その年度は既に存在します。'); return; }
+        const newYearData = generateYearData();
+        if (carryOver) {
+          BUCKETS.forEach(b => {
+            newYearData[b].plans = teamData[actualYear][b].plans;
+            newYearData[b].practices = teamData[actualYear][b].practices;
+          });
+          newYearData.groupSettings = { ...(teamData[actualYear].groupSettings || legacyGroupSettings || {}) };
+        }
+        const newTeamYears = { ...teamData, [label]: newYearData };
+        setHistory(prev => [...prev, globalStore]);
+        setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
+        persist(currentTeam, newTeamYears);
+        setCurrentYear(label);
+      };
+      const renameYear = (oldYear) => {
+        if (!isAdmin) return;
+        const newYear = prompt(`新しい年度名を入力してください（現在: ${oldYear}）`, oldYear);
+        if (!newYear || !newYear.trim() || newYear === oldYear) return;
+        if (teamData[newYear]) { alert('その年度は既に存在します。'); return; }
+        const newTeamYears = { ...teamData };
+        newTeamYears[newYear] = newTeamYears[oldYear];
+        delete newTeamYears[oldYear];
+        setHistory(prev => [...prev, globalStore]);
+        setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
+        persist(currentTeam, newTeamYears);
+        if (actualYear === oldYear) setCurrentYear(newYear);
+      };
+      const deleteYear = (year) => {
+        if (!isAdmin) return;
+        if (availableYears.length <= 1) { alert('最後の年度は削除できません。'); return; }
+        if (!window.confirm(`${year}年度のデータを完全に削除します。元に戻せません。本当に削除しますか？`)) return;
+        const newTeamYears = { ...teamData };
+        delete newTeamYears[year];
+        setHistory(prev => [...prev, globalStore]);
+        setGlobalStore(prev => ({ ...prev, [currentTeam]: newTeamYears }));
+        persist(currentTeam, newTeamYears);
+        if (actualYear === year) {
+          const remaining = Object.keys(newTeamYears).sort();
+          setCurrentYear(remaining[0]);
         }
       };
 
@@ -1292,7 +1342,8 @@
                   <select className={`bg-slate-900 ${theme.text} border border-slate-600 font-bold text-sm p-1.5 rounded`} value={actualYear} onChange={(e) => setCurrentYear(e.target.value)}>
                     {availableYears.map(y => <option key={y} value={y}>{y}年度</option>)}
                   </select>
-                  <button onClick={handleAddYear} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold px-2 py-1.5 rounded text-xs`}><i className="fas fa-angle-double-right"></i></button>
+                  <button onClick={handleAddYear} disabled={isViewer} title="次年度を作成" className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold px-2 py-1.5 rounded text-xs`}><i className="fas fa-angle-double-right"></i></button>
+                  <button onClick={() => setYearMgmtOpen(true)} disabled={isViewer} title="年度を管理" className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white font-bold px-2 py-1.5 rounded text-xs border border-slate-500"><i className="fas fa-cog"></i></button>
                 </div>
                 <div className="h-6 w-px bg-slate-600 mx-1"></div>
                 {isAdmin && <button onClick={onGoAdmin} className="bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold px-3 py-1.5 rounded"><i className="fas fa-user-shield mr-1"></i>管理者</button>}
@@ -1324,6 +1375,41 @@
               </div>
             </div>
           </div>
+
+          {yearMgmtOpen && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-[80] no-print" onClick={() => setYearMgmtOpen(false)}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                <div className="p-4 space-y-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-black text-gray-700"><i className="fas fa-calendar-alt text-gray-400 mr-1.5"></i>年度を管理（{currentTeam}）</span>
+                    <button onClick={() => setYearMgmtOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg"><i className="fas fa-times"></i></button>
+                  </div>
+                  <div className="divide-y divide-gray-100 border border-gray-100 rounded-lg overflow-hidden">
+                    {availableYears.map(y => (
+                      <div key={y} className="flex items-center justify-between px-3 py-2 text-sm">
+                        <span className={`font-bold ${y === actualYear ? theme.text : 'text-gray-700'}`}>{y}年度{y === actualYear && <span className="text-[10px] text-gray-400 ml-1">（表示中）</span>}</span>
+                        {isAdmin && (
+                          <div className="flex gap-2">
+                            <button onClick={() => renameYear(y)} className="text-[11px] font-bold px-2 py-1 rounded bg-gray-100 hover:bg-gray-200"><i className="fas fa-pen mr-1"></i>名称変更</button>
+                            <button onClick={() => deleteYear(y)} className="text-[11px] font-bold px-2 py-1 rounded bg-rose-50 text-rose-600 hover:bg-rose-100"><i className="fas fa-trash-alt mr-1"></i>削除</button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {!isAdmin && <p className="text-[10px] text-gray-400"><i className="fas fa-info-circle mr-1"></i>名称変更・削除は管理者のみ行えます。</p>}
+                  <div className="border-t border-gray-100 pt-3 space-y-2">
+                    <label className="text-[10px] font-bold text-gray-500 block">新しい年度を追加</label>
+                    <div className="flex gap-2">
+                      <input value={newYearInput} onChange={e => setNewYearInput(e.target.value)} placeholder="例：2027" className="flex-grow border border-gray-300 rounded p-2 text-sm"/>
+                      <button onClick={() => { if (window.confirm(`${newYearInput}年度を作成し、現在の育成計画・練習メニューを引き継ぎますか？`)) { addCustomYear(newYearInput, true); setNewYearInput(''); setYearMgmtOpen(false); } }} className={`${theme.bg} ${theme.hover} text-white font-bold text-xs px-3 py-2 rounded whitespace-nowrap`}>追加</button>
+                    </div>
+                    <p className="text-[10px] text-gray-400">現在（{actualYear}年度）の育成計画・練習メニューを引き継いで作成します。</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           <main className="flex-grow max-w-7xl w-full mx-auto p-4 pt-52 md:pt-40 pb-12">
 
@@ -1579,7 +1665,7 @@
                   const calCells = [];
                   for (let i = 0; i < calLeadingBlanks; i++) calCells.push(null);
                   for (let d = 1; d <= calDaysInMonth; d++) calCells.push(d);
-                  const calEventsOnDay = (day) => datedEvents.filter(e => e.parsedDate.getFullYear() === calGridYear && e.parsedDate.getMonth() === calMonthNum - 1 && e.parsedDate.getDate() === day);
+                  const calEventsOnDay = (day) => datedEvents.filter(e => e.parsedDate && e.parsedDate.getFullYear() === calGridYear && e.parsedDate.getMonth() === calMonthNum - 1 && e.parsedDate.getDate() === day);
                   const todayForCal = new Date(); todayForCal.setHours(0,0,0,0);
                   const weekDayLabels = ['日','月','火','水','木','金','土'];
                   return (
