@@ -143,6 +143,21 @@
       return '大会';
     };
 
+    // 「通常練習の時間」欄（例：月・水・金 16:00〜18:00）から、該当する曜日と時間を読み取り、
+    // カレンダーの該当する日に黒文字で自動表示するための補助関数
+    const parseRoutineWeekdays = (text) => {
+      if (!text) return [];
+      const map = { '日': 0, '月': 1, '火': 2, '水': 3, '木': 4, '金': 5, '土': 6 };
+      return Object.keys(map).filter(k => text.includes(k)).map(k => map[k]);
+    };
+    const parseRoutineTimeLabel = (text) => {
+      if (!text) return '';
+      const range = text.match(/(\d{1,2}:\d{2})\s*[〜~\-−]\s*(\d{1,2}:\d{2})/);
+      if (range) return `${range[1]}〜`;
+      const single = text.match(/(\d{1,2}:\d{2})/);
+      return single ? `${single[1]}〜` : '';
+    };
+
 
 
     const initialTournaments = [
@@ -909,6 +924,8 @@
       const [photoUploading, setPhotoUploading] = useState(null); // アップロード中のtournament idx
       const [gameDayId, setGameDayId] = useState(null); // 大会当日モードで選択中の大会id
       const [calendarMonth, setCalendarMonth] = useState(null); // カレンダータブで表示中の月
+      const headerRef = useRef(null);
+      const [headerHeight, setHeaderHeight] = useState(210); // ヘッダーの実際の高さを測って本文の余白に反映（スマホでボタンが増えて折り返ると固定値では隙間が合わなくなるため）
       const [dayModal, setDayModal] = useState(null); // { day, month, idxs } タップした日の予定編集
       const [yearMgmtOpen, setYearMgmtOpen] = useState(false);
       const [newYearInput, setNewYearInput] = useState('');
@@ -954,6 +971,23 @@
         if (diff < 86400000) return `${Math.floor(diff/3600000)}時間前`;
         return `${Math.floor(diff/86400000)}日前`;
       };
+
+      // ヘッダーはボタン数が多く、スマホ幅では折り返して縦に伸びる。
+      // 本文側の余白を固定値にしていると、折り返しが増えた時にヘッダーと本文が重なって
+      // 「HOMEの上が切れる」状態になるため、実際の高さを測って余白に反映する。
+      useEffect(() => {
+        const el = headerRef.current;
+        if (!el) return;
+        const update = () => setHeaderHeight(el.offsetHeight);
+        update();
+        let ro;
+        if (typeof ResizeObserver !== 'undefined') {
+          ro = new ResizeObserver(update);
+          ro.observe(el);
+        }
+        window.addEventListener('resize', update);
+        return () => { if (ro) ro.disconnect(); window.removeEventListener('resize', update); };
+      }, [currentTeam, currentBucket, isViewer, isAdmin]);
 
       if (isLoading || !globalStore) {
         return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white"><div className="loader mb-4"></div><p className="font-bold">同期中...</p></div>;
@@ -1344,7 +1378,7 @@
             </div>
           )}
 
-          <div className={`fixed top-0 left-0 right-0 z-50 bg-slate-900 text-white shadow-xl border-b-4 ${theme.border} no-print transition-colors duration-300`}>
+          <div ref={headerRef} className={`fixed top-0 left-0 right-0 z-50 bg-slate-900 text-white shadow-xl border-b-4 ${theme.border} no-print transition-colors duration-300`}>
 
             <div className="max-w-7xl mx-auto px-4 pt-4 pb-3 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
               <div>
@@ -1466,7 +1500,7 @@
             </div>
           )}
 
-          <main className="flex-grow max-w-7xl w-full mx-auto p-4 pt-52 md:pt-40 pb-12">
+          <main className="flex-grow max-w-7xl w-full mx-auto p-4 pb-12" style={{ paddingTop: `${headerHeight + 16}px` }}>
 
             <div className="hidden print-only mb-6 text-center border-b-2 border-gray-800 pb-4">
               <h1 className="text-2xl font-black">【{currentTeam}】 {actualYear}年度 {currentBucket === '共通' ? 'チーム共通' : currentBucket + 'チーム'} 育成システム</h1>
@@ -1728,6 +1762,8 @@
                   const calEventsOnDay = (day) => datedEvents.filter(e => e.parsedDate && e.parsedDate.getFullYear() === calGridYear && e.parsedDate.getMonth() === calMonthNum - 1 && e.parsedDate.getDate() === day);
                   const todayForCal = new Date(); todayForCal.setHours(0,0,0,0);
                   const weekDayLabels = ['日','月','火','水','木','金','土'];
+                  const routineWeekdays = parseRoutineWeekdays(currentPublicInfo.defaultSchedule);
+                  const routineLabel = parseRoutineTimeLabel(currentPublicInfo.defaultSchedule) || '練習';
                   return (
                     <div className="border border-gray-200 rounded-xl p-3">
                       <div className="flex items-center justify-between mb-2 no-print">
@@ -1749,6 +1785,7 @@
                           if (day === null) return <div key={i}></div>;
                           const evs = calEventsOnDay(day);
                           const isToday = calGridYear === todayForCal.getFullYear() && calMonthNum - 1 === todayForCal.getMonth() && day === todayForCal.getDate();
+                          const isRoutineDay = evs.length === 0 && routineWeekdays.includes(new Date(calGridYear, calMonthNum - 1, day).getDay());
                           const cellColorClass = evs.length === 1
                             ? `${orgCellClass(evs[0].org)} border`
                             : evs.length > 1 ? `bg-gray-50 ${theme.text} border ${theme.border}` : 'text-gray-400 hover:bg-gray-50';
@@ -1758,12 +1795,13 @@
                               onClick={() => isViewer ? null : setDayModal({ day, month: calActiveMonth, idxs: evs.length ? evs.map(e => e.idx) : [] })}
                               className={`aspect-square rounded-lg flex flex-col items-center justify-center text-xs font-bold relative ${cellColorClass} ${isToday ? 'ring-2 ring-amber-400' : ''}`}
                             >
-                              {day}
+                              <span className={isRoutineDay ? 'text-gray-800' : ''}>{day}</span>
                               {evs.length > 0 && (
                                 <span className="flex gap-0.5 mt-0.5">
                                   {evs.slice(0, 3).map((e, di) => <span key={di} className={`w-1.5 h-1.5 rounded-full ${eventTypeDotClass(e.eventType || e.type)}`}></span>)}
                                 </span>
                               )}
+                              {isRoutineDay && <span className="text-[7px] text-gray-700 font-bold leading-none mt-0.5 truncate max-w-full px-0.5">{routineLabel}</span>}
                             </button>
                           );
                         })}
@@ -2209,6 +2247,8 @@
       const weekDayLabels = ['日','月','火','水','木','金','土'];
       const publicInfo = data.publicInfo || {};
       const seasonResults = bucketEvents.filter(t => t.result);
+      const routineWeekdays = parseRoutineWeekdays(publicInfo.defaultSchedule);
+      const routineLabel = parseRoutineTimeLabel(publicInfo.defaultSchedule) || '練習';
 
       return (
         <div className="min-h-screen bg-gray-100">
@@ -2281,6 +2321,7 @@
                       if (day === null) return <div key={i}></div>;
                       const evs = eventsOnDay(day);
                       const isToday = gridYear === today.getFullYear() && monthNum - 1 === today.getMonth() && day === today.getDate();
+                      const isRoutineDay = evs.length === 0 && routineWeekdays.includes(new Date(gridYear, monthNum - 1, day).getDay());
                       const cellColorClass = evs.length === 1
                         ? `${orgCellClass(evs[0].org)} border cursor-pointer`
                         : evs.length > 1 ? `${theme.light} ${theme.text} border ${theme.border} cursor-pointer` : 'text-gray-400';
@@ -2290,12 +2331,13 @@
                           onClick={() => evs.length && setDetailEvents(evs)}
                           className={`aspect-square rounded-lg flex flex-col items-center justify-center text-xs font-bold relative ${cellColorClass} ${isToday ? 'ring-2 ring-amber-400' : ''}`}
                         >
-                          {day}
+                          <span className={isRoutineDay ? 'text-gray-800' : ''}>{day}</span>
                           {evs.length > 0 && (
                             <span className="flex gap-0.5 mt-0.5">
                               {evs.slice(0, 3).map((e, di) => <span key={di} className={`w-1.5 h-1.5 rounded-full ${eventTypeDotClass(e.eventType)}`}></span>)}
                             </span>
                           )}
+                          {isRoutineDay && <span className="text-[7px] text-gray-700 font-bold leading-none mt-0.5 truncate max-w-full px-0.5">{routineLabel}</span>}
                         </button>
                       );
                     })}
