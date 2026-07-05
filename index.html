@@ -157,6 +157,20 @@
       const single = text.match(/(\d{1,2}:\d{2})/);
       return single ? `${single[1]}〜` : '';
     };
+    // 「通常練習の時間」は月によって曜日・時間が変わることがあるため、月ごとに複数ルールを持てる配列にしている。
+    // 古いデータ（単純な文字列）はどの月にも当てはまる1件のルールとして扱う（後方互換のため）。
+    const scheduleRulesOf = (schedule) => {
+      if (Array.isArray(schedule)) return schedule;
+      if (schedule) return [{ months: [], text: schedule }];
+      return [];
+    };
+    const resolveScheduleForMonth = (schedule, monthLabel) => {
+      const rules = scheduleRulesOf(schedule);
+      const specific = rules.find(r => Array.isArray(r.months) && r.months.includes(monthLabel));
+      if (specific) return specific.text;
+      const fallback = rules.find(r => !r.months || r.months.length === 0);
+      return fallback ? fallback.text : '';
+    };
 
 
 
@@ -1082,6 +1096,52 @@
         setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
         persistPublicInfo(next);
       };
+      // ---- 通常練習の時間（月ごとに複数ルールを持てる） ----
+      const addScheduleRule = () => {
+        if (isViewer) return;
+        const rules = scheduleRulesOf(currentPublicInfo.defaultSchedule);
+        const next = { ...currentPublicInfo, defaultSchedule: [...rules, { months: [], text: '' }] };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      const updateScheduleRule = (idx, field, value) => {
+        if (isViewer) return;
+        lastEditAtRef.current[currentTeam] = Date.now();
+        const rules = [...scheduleRulesOf(currentPublicInfo.defaultSchedule)];
+        rules[idx] = { ...rules[idx], [field]: value };
+        const next = { ...currentPublicInfo, defaultSchedule: rules };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      const toggleScheduleRuleMonth = (idx, month) => {
+        if (isViewer) return;
+        const rules = [...scheduleRulesOf(currentPublicInfo.defaultSchedule)];
+        const months = rules[idx].months || [];
+        rules[idx] = { ...rules[idx], months: months.includes(month) ? months.filter(m => m !== month) : [...months, month] };
+        const next = { ...currentPublicInfo, defaultSchedule: rules };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      const deleteScheduleRule = (idx) => {
+        if (isViewer) return;
+        const rules = scheduleRulesOf(currentPublicInfo.defaultSchedule).filter((_, i) => i !== idx);
+        const next = { ...currentPublicInfo, defaultSchedule: rules };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      // カレンダータブから「今表示している月」のルールをその場で編集するための簡易版
+      // （既にその月専用のルールがあれば更新、無ければ新規作成する）
+      const updateScheduleForMonth = (monthLabel, text) => {
+        if (isViewer) return;
+        lastEditAtRef.current[currentTeam] = Date.now();
+        const rules = [...scheduleRulesOf(currentPublicInfo.defaultSchedule)];
+        const idx = rules.findIndex(r => Array.isArray(r.months) && r.months.length === 1 && r.months[0] === monthLabel);
+        if (idx >= 0) rules[idx] = { ...rules[idx], text };
+        else rules.push({ months: [monthLabel], text });
+        const next = { ...currentPublicInfo, defaultSchedule: rules };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
       const addFaqItem = () => {
         if (isViewer) return;
         const next = { ...currentPublicInfo, faq: [...(currentPublicInfo.faq || []), { id: uid('faq'), q: '', a: '' }] };
@@ -1243,7 +1303,7 @@
       };
       const exportTournamentsCsv = () => {
         const rows = [['グループ','開催月','日程','大会名','カテゴリ','位置付け','結果']];
-        currentData.tournaments.forEach(t => rows.push([t.id, t.month, t.date, t.name, t.category, (t.target||'').replace(/\n/g,' '), (t.result||'').replace(/\n/g,' ')]));
+        sortedTournamentEntries.forEach(t => rows.push([t.id, t.month, t.date, t.name, t.category, (t.target||'').replace(/\n/g,' '), (t.result||'').replace(/\n/g,' ')]));
         const csv = rows.map(r => r.map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
         downloadBlob(`${currentTeam}_${currentBucket}_大会一覧.csv`, '\uFEFF' + csv, 'text/csv');
       };
@@ -1330,6 +1390,14 @@
         return Number.isNaN(dt.getTime()) ? null : dt;
       };
       const datedEvents = (currentData.tournaments || []).map((t, idx) => ({...t, idx, parsedDate: parseEventDate(t), type: t.eventType || guessEventType(t)}));
+      // 表・保護者表示・CSV書き出しなど「一覧」で使う、月日順に並べたリスト（追加順ではなく日付順に見せるため）。
+      // 日付が読み取れない予定は最後にまとめ、その中では元の並び順を保つ。
+      const sortedTournamentEntries = datedEvents.slice().sort((a, b) => {
+        if (a.parsedDate && b.parsedDate) return a.parsedDate - b.parsedDate;
+        if (a.parsedDate) return -1;
+        if (b.parsedDate) return 1;
+        return a.idx - b.idx;
+      });
       const today = new Date(); today.setHours(0,0,0,0);
       const todayISO = today.toISOString().slice(0,10);
       const upcomingEvents = datedEvents.filter(e => e.parsedDate && e.parsedDate >= today).sort((a,b)=>a.parsedDate-b.parsedDate);
@@ -1673,7 +1741,7 @@
                   <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-md">
                     <h3 className="font-bold text-gray-800 border-b pb-2 mb-3 text-sm"><i className={`fas fa-flag ${theme.text} mr-2`}>直近の大会ハイライト</i></h3>
                     <div className="space-y-2">
-                      {currentData.tournaments.slice(0, 3).map((t, i) => (
+                      {sortedTournamentEntries.slice(0, 3).map((t, i) => (
                         <div key={i} className="flex justify-between items-center text-xs">
                           <span className={`font-black ${theme.text} bg-gray-50 px-2 py-0.5 rounded border border-gray-100`}>{t.month}</span>
                           <span className="font-bold text-gray-700 truncate flex-grow ml-2">{t.name}</span>
@@ -1744,11 +1812,6 @@
                   </div>
                 </div>
 
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-2 no-print">
-                  <label className="text-[11px] font-black text-blue-500 whitespace-nowrap"><i className="fas fa-clock mr-1"></i>通常練習の時間</label>
-                  <input disabled={isViewer} value={currentPublicInfo.defaultSchedule || ''} onChange={e => updatePublicInfo('defaultSchedule', e.target.value)} placeholder="例：月・水・金 16:00〜18:00" className="flex-grow border border-blue-200 rounded-lg p-2 text-xs bg-white"/>
-                </div>
-
                 {(() => {
                   const calActiveMonth = (calendarMonth && monthLabels.includes(calendarMonth)) ? calendarMonth : (nextEvent ? monthLabels.find(l => l.replace('月','') === String(nextEvent.parsedDate.getMonth() + 1)) : '4月');
                   const calMonthNum = Number(calActiveMonth.replace('月',''));
@@ -1762,10 +1825,15 @@
                   const calEventsOnDay = (day) => datedEvents.filter(e => e.parsedDate && e.parsedDate.getFullYear() === calGridYear && e.parsedDate.getMonth() === calMonthNum - 1 && e.parsedDate.getDate() === day);
                   const todayForCal = new Date(); todayForCal.setHours(0,0,0,0);
                   const weekDayLabels = ['日','月','火','水','木','金','土'];
-                  const routineWeekdays = parseRoutineWeekdays(currentPublicInfo.defaultSchedule);
-                  const routineLabel = parseRoutineTimeLabel(currentPublicInfo.defaultSchedule) || '練習';
+                  const monthSchedule = resolveScheduleForMonth(currentPublicInfo.defaultSchedule, calActiveMonth);
+                  const routineWeekdays = parseRoutineWeekdays(monthSchedule);
+                  const routineLabel = parseRoutineTimeLabel(monthSchedule) || '練習';
                   return (
                     <div className="border border-gray-200 rounded-xl p-3">
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-2 no-print mb-3">
+                        <label className="text-[11px] font-black text-blue-500 whitespace-nowrap"><i className="fas fa-clock mr-1"></i>{calActiveMonth}の通常練習</label>
+                        <input disabled={isViewer} value={monthSchedule} onChange={e => updateScheduleForMonth(calActiveMonth, e.target.value)} placeholder="例：月・水・金 16:00〜18:00" className="flex-grow border border-blue-200 rounded-lg p-2 text-xs bg-white"/>
+                      </div>
                       <div className="flex items-center justify-between mb-2 no-print">
                         <button onClick={() => { const i = monthLabels.indexOf(calActiveMonth); setCalendarMonth(monthLabels[(i - 1 + 12) % 12]); }} className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold"><i className="fas fa-chevron-left"></i></button>
                         <div className="flex items-center gap-2">
@@ -1883,41 +1951,41 @@
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 text-xs">
-                      {currentData.tournaments.map((t, idx) => (
-                        <tr key={t.id || idx} className="hover:bg-gray-50 transition-colors">
-                          <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-transparent w-full" value={inferTournamentGroup(t)} onChange={(e) => updateTournament(idx, 'group', e.target.value)} disabled={isViewer}>{groupList.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
-                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-bold text-center bg-transparent" value={t.month} onChange={(e) => updateTournament(idx, 'month', e.target.value)} readOnly={isViewer}/></td>
-                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-mono text-center font-bold bg-transparent" value={t.date} onChange={(e) => updateTournament(idx, 'date', e.target.value)} readOnly={isViewer}/></td>
+                      {sortedTournamentEntries.map((t) => (
+                        <tr key={t.id || t.idx} className="hover:bg-gray-50 transition-colors">
+                          <td className="p-2 text-center"><select className="border rounded p-1 font-bold text-center bg-transparent w-full" value={inferTournamentGroup(t)} onChange={(e) => updateTournament(t.idx, 'group', e.target.value)} disabled={isViewer}>{groupList.map(g => <option key={g.id} value={g.id}>{g.id}</option>)}</select></td>
+                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-bold text-center bg-transparent" value={t.month} onChange={(e) => updateTournament(t.idx, 'month', e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2"><input type="text" className="border rounded p-1 w-full font-mono text-center font-bold bg-transparent" value={t.date} onChange={(e) => updateTournament(t.idx, 'date', e.target.value)} readOnly={isViewer}/></td>
                           <td className="p-2 space-y-1">
-                            <input type="text" className="border rounded p-1 w-full font-bold bg-transparent" value={t.name} onChange={(e) => updateTournament(idx, 'name', e.target.value)} readOnly={isViewer}/>
-                            <input type="text" className="border-none p-0.5 w-full text-[10px] text-gray-500 bg-transparent" value={t.category} onChange={(e) => updateTournament(idx, 'category', e.target.value)} placeholder="カテゴリ" readOnly={isViewer}/>
+                            <input type="text" className="border rounded p-1 w-full font-bold bg-transparent" value={t.name} onChange={(e) => updateTournament(t.idx, 'name', e.target.value)} readOnly={isViewer}/>
+                            <input type="text" className="border-none p-0.5 w-full text-[10px] text-gray-500 bg-transparent" value={t.category} onChange={(e) => updateTournament(t.idx, 'category', e.target.value)} placeholder="カテゴリ" readOnly={isViewer}/>
                           </td>
-                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none bg-transparent leading-relaxed" value={t.target} onChange={(e) => updateTournament(idx, 'target', e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-gray-600 resize-none bg-transparent leading-relaxed" value={t.target} onChange={(e) => updateTournament(t.idx, 'target', e.target.value)} readOnly={isViewer}/></td>
                           <td className="p-2 space-y-1">
-                            <select value={t.eventType || guessEventType(t)} onChange={e=>updateTournamentExtra(idx,'eventType',e.target.value)} disabled={isViewer} className="border rounded p-1 w-full text-[10px] font-bold bg-transparent">{EVENT_TYPES.map(et => <option key={et}>{et}</option>)}</select>
-                            <select value={t.org || '学校部活'} onChange={e=>updateTournamentExtra(idx,'org',e.target.value)} disabled={isViewer} className="border rounded p-1 w-full text-[10px] bg-transparent">{AFFILIATIONS.map(a => <option key={a}>{a}</option>)}</select>
-                            <input value={t.place || ''} onChange={e=>updateTournamentExtra(idx,'place',e.target.value)} readOnly={isViewer} placeholder="場所" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
-                            <input value={t.meeting || ''} onChange={e=>updateTournamentExtra(idx,'meeting',e.target.value)} readOnly={isViewer} placeholder="集合" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
-                            <input value={t.belongings || ''} onChange={e=>updateTournamentExtra(idx,'belongings',e.target.value)} readOnly={isViewer} placeholder="持ち物" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
-                            <textarea value={t.notice || ''} onChange={e=>updateTournamentExtra(idx,'notice',e.target.value)} readOnly={isViewer} placeholder="連絡事項" className="border rounded p-1 w-full h-10 text-[10px] bg-transparent resize-none"></textarea>
-                            <label className="flex items-center gap-1 text-[10px] text-gray-500 font-bold"><input type="checkbox" checked={t.parentVisible !== false} onChange={e=>updateTournamentExtra(idx,'parentVisible',e.target.checked)} disabled={isViewer}/>保護者表示</label>
+                            <select value={t.eventType || guessEventType(t)} onChange={e=>updateTournamentExtra(t.idx,'eventType',e.target.value)} disabled={isViewer} className="border rounded p-1 w-full text-[10px] font-bold bg-transparent">{EVENT_TYPES.map(et => <option key={et}>{et}</option>)}</select>
+                            <select value={t.org || '学校部活'} onChange={e=>updateTournamentExtra(t.idx,'org',e.target.value)} disabled={isViewer} className="border rounded p-1 w-full text-[10px] bg-transparent">{AFFILIATIONS.map(a => <option key={a}>{a}</option>)}</select>
+                            <input value={t.place || ''} onChange={e=>updateTournamentExtra(t.idx,'place',e.target.value)} readOnly={isViewer} placeholder="場所" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
+                            <input value={t.meeting || ''} onChange={e=>updateTournamentExtra(t.idx,'meeting',e.target.value)} readOnly={isViewer} placeholder="集合" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
+                            <input value={t.belongings || ''} onChange={e=>updateTournamentExtra(t.idx,'belongings',e.target.value)} readOnly={isViewer} placeholder="持ち物" className="border rounded p-1 w-full text-[10px] bg-transparent"/>
+                            <textarea value={t.notice || ''} onChange={e=>updateTournamentExtra(t.idx,'notice',e.target.value)} readOnly={isViewer} placeholder="連絡事項" className="border rounded p-1 w-full h-10 text-[10px] bg-transparent resize-none"></textarea>
+                            <label className="flex items-center gap-1 text-[10px] text-gray-500 font-bold"><input type="checkbox" checked={t.parentVisible !== false} onChange={e=>updateTournamentExtra(t.idx,'parentVisible',e.target.checked)} disabled={isViewer}/>保護者表示</label>
                             {!isViewer && <button onClick={() => copyParentMessage(t)} className="text-[10px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded w-full"><i className="fas fa-copy mr-1"></i>LINE用にコピー</button>}
                           </td>
-                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-emerald-700 resize-none bg-emerald-50 leading-relaxed" placeholder="順位・戦績・結果メモ" value={t.result || ''} onChange={(e) => updateTournamentResult(idx, e.target.value)} readOnly={isViewer}/></td>
+                          <td className="p-2"><textarea className="border rounded p-1 w-full h-12 text-emerald-700 resize-none bg-emerald-50 leading-relaxed" placeholder="順位・戦績・結果メモ" value={t.result || ''} onChange={(e) => updateTournamentResult(t.idx, e.target.value)} readOnly={isViewer}/></td>
                           <td className="p-2">
                             {t.photoDataUrl ? (
                               <div className="space-y-1">
                                 <img src={t.photoDataUrl} alt="" className="w-full h-16 object-cover rounded border border-gray-200"/>
-                                {!isViewer && <button onClick={() => removeTournamentPhoto(idx)} className="text-[10px] font-bold text-rose-600 w-full">削除</button>}
+                                {!isViewer && <button onClick={() => removeTournamentPhoto(t.idx)} className="text-[10px] font-bold text-rose-600 w-full">削除</button>}
                               </div>
                             ) : !isViewer && (
                               <label className="flex flex-col items-center justify-center gap-1 border border-dashed border-gray-300 rounded p-2 text-gray-400 cursor-pointer text-[10px] h-16">
-                                <i className="fas fa-camera"></i>{photoUploading === idx ? '読込中' : '写真追加'}
-                                <input type="file" accept="image/*" className="hidden" onChange={e => e.target.files[0] && uploadTournamentPhoto(idx, e.target.files[0])} />
+                                <i className="fas fa-camera"></i>{photoUploading === t.idx ? '読込中' : '写真追加'}
+                                <input type="file" accept="image/*" className="hidden" onChange={e => e.target.files[0] && uploadTournamentPhoto(t.idx, e.target.files[0])} />
                               </label>
                             )}
                           </td>
-                          <td className="p-2 text-center no-print">{!isViewer && <button onClick={() => deleteTournament(idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>}</td>
+                          <td className="p-2 text-center no-print">{!isViewer && <button onClick={() => deleteTournament(t.idx)} className="text-gray-400 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1937,9 +2005,28 @@
                     <textarea disabled={isViewer} value={currentPublicInfo.greeting} onChange={e => updatePublicInfo('greeting', e.target.value)} placeholder="例：保護者の皆様へ。当クラブでは○○を大切に指導しています。" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50 min-h-[80px] leading-relaxed"/>
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-gray-500 block mb-1">通常練習の時間（曜日・時間帯）</label>
-                    <input disabled={isViewer} value={currentPublicInfo.defaultSchedule || ''} onChange={e => updatePublicInfo('defaultSchedule', e.target.value)} placeholder="例：月・水・金 16:00〜18:00（テスト期間・長期休みはカレンダーの予定を確認）" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50"/>
-                    <p className="text-[10px] text-gray-400 mt-1">毎回の通常練習はカレンダーには入れず、ここに1つだけ設定してください。時間が変わる日（テスト期間・懇談・長期休みなど）だけカレンダーに登録すれば、色だらけにならずに済みます。</p>
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="text-[10px] font-bold text-gray-500">通常練習の時間（月ごとに設定できます）</label>
+                      {!isViewer && <button onClick={addScheduleRule} className="bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold px-2.5 py-1.5 rounded"><i className="fas fa-plus mr-1"></i>ルール追加</button>}
+                    </div>
+                    <div className="space-y-2">
+                      {scheduleRulesOf(currentPublicInfo.defaultSchedule).map((rule, idx) => (
+                        <div key={idx} className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 space-y-1.5">
+                          <div className="flex flex-wrap gap-1">
+                            {monthLabels.map(m => (
+                              <button key={m} type="button" disabled={isViewer} onClick={() => toggleScheduleRuleMonth(idx, m)} className={`text-[10px] font-bold px-1.5 py-1 rounded ${(rule.months || []).includes(m) ? 'bg-blue-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}>{m}</button>
+                            ))}
+                          </div>
+                          {(!rule.months || rule.months.length === 0) && <p className="text-[10px] text-amber-600"><i className="fas fa-info-circle mr-1"></i>月を選んでいない場合、他のルールが無い月すべてに適用されます</p>}
+                          <div className="flex gap-2">
+                            <input disabled={isViewer} value={rule.text} onChange={e => updateScheduleRule(idx, 'text', e.target.value)} placeholder="例：月・水・金 16:00〜18:00" className="flex-grow border border-gray-200 rounded p-2 text-xs bg-white"/>
+                            {!isViewer && <button onClick={() => deleteScheduleRule(idx)} className="text-gray-400 hover:text-red-500 px-1"><i className="fas fa-trash-alt"></i></button>}
+                          </div>
+                        </div>
+                      ))}
+                      {scheduleRulesOf(currentPublicInfo.defaultSchedule).length === 0 && <p className="text-[11px] text-gray-400">まだ設定されていません。</p>}
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1">毎回の通常練習はカレンダーには入れず、ここで設定してください。時間が変わる日（テスト期間・懇談・長期休みなど）だけカレンダーに個別に登録すれば、色だらけにならずに済みます。カレンダータブの各月表示からも直接編集できます。</p>
                   </div>
                   <div>
                     <label className="text-[10px] font-bold text-gray-500 block mb-1">連絡先（メール・LINE等）</label>
@@ -1987,7 +2074,7 @@
                       </div>
                     )}
                     <div className="divide-y divide-gray-100">
-                      {(currentData.tournaments || []).filter(t => t.parentVisible !== false).map((t, idx) => (
+                      {sortedTournamentEntries.filter(t => t.parentVisible !== false).map((t, idx) => (
                         <div key={t.id || idx} className="py-3 grid grid-cols-1 md:grid-cols-6 gap-2 text-sm items-start">
                           <div className="font-black text-blue-600">{t.month}<br/><span className="text-xs text-gray-500">{t.date}</span></div>
                           <div className="md:col-span-2"><div className="font-black text-gray-800">{t.name}</div><div className="text-[11px] text-gray-400">{t.eventType || guessEventType(t)} / {t.category}</div></div>
@@ -2222,7 +2309,7 @@
 
       const bucketEvents = activeBucket ? (tournamentsByBucket[activeBucket] || []).filter(t => t.parentVisible !== false) : [];
       const datedEvents = bucketEvents.map(t => ({ ...t, parsedDate: parsePublicDate(t) })).filter(e => e.parsedDate);
-      const undatedEvents = bucketEvents.filter(t => !parsePublicDate(t));
+      const undatedEvents = bucketEvents.filter(t => !parsePublicDate(t)).slice().sort((a, b) => PUBLIC_MONTH_LABELS.indexOf(a.month) - PUBLIC_MONTH_LABELS.indexOf(b.month));
 
       const today = new Date(); today.setHours(0,0,0,0);
       const upcoming = datedEvents.filter(e => e.parsedDate >= today).sort((a,b)=>a.parsedDate-b.parsedDate);
@@ -2246,9 +2333,10 @@
       const theme = PUBLIC_BUCKET_THEME[activeBucket] || PUBLIC_BUCKET_THEME['共通'];
       const weekDayLabels = ['日','月','火','水','木','金','土'];
       const publicInfo = data.publicInfo || {};
-      const seasonResults = bucketEvents.filter(t => t.result);
-      const routineWeekdays = parseRoutineWeekdays(publicInfo.defaultSchedule);
-      const routineLabel = parseRoutineTimeLabel(publicInfo.defaultSchedule) || '練習';
+      const seasonResults = datedEvents.filter(t => t.result).slice().sort((a, b) => a.parsedDate - b.parsedDate);
+      const monthSchedule = resolveScheduleForMonth(publicInfo.defaultSchedule, activeMonth);
+      const routineWeekdays = parseRoutineWeekdays(monthSchedule);
+      const routineLabel = parseRoutineTimeLabel(monthSchedule) || '練習';
 
       return (
         <div className="min-h-screen bg-gray-100">
@@ -2259,11 +2347,18 @@
           </div>
 
           <div className="max-w-3xl mx-auto p-4 space-y-4">
-            {publicInfo.defaultSchedule && (
+            {scheduleRulesOf(publicInfo.defaultSchedule).length > 0 && (
               <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
-                <div className="text-[11px] font-black text-blue-500 mb-1"><i className="fas fa-clock mr-1.5"></i>通常練習の時間</div>
-                <p className="text-sm text-blue-800 font-bold whitespace-pre-wrap leading-relaxed">{publicInfo.defaultSchedule}</p>
-                <p className="text-[10px] text-blue-400 mt-1">※時間が変わる日はカレンダーに個別に表示されます</p>
+                <div className="text-[11px] font-black text-blue-500 mb-2"><i className="fas fa-clock mr-1.5"></i>通常練習の時間</div>
+                <div className="space-y-1.5">
+                  {scheduleRulesOf(publicInfo.defaultSchedule).map((rule, i) => (
+                    <div key={i} className="flex flex-col sm:flex-row sm:items-baseline gap-1">
+                      {rule.months && rule.months.length > 0 && <span className="text-[10px] font-black text-blue-400 whitespace-nowrap">{rule.months.join('・')}：</span>}
+                      <span className="text-sm text-blue-800 font-bold whitespace-pre-wrap leading-relaxed">{rule.text}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] text-blue-400 mt-2">※時間が変わる日はカレンダーに個別に表示されます</p>
               </div>
             )}
             {publicInfo.greeting && (
