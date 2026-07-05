@@ -744,6 +744,7 @@
 
     const TrainingApp = ({ profile, onGoAdmin, onLogout }) => {
       const [globalStore, setGlobalStore] = useState(null);
+      const [teamPublicInfoMap, setTeamPublicInfoMap] = useState({}); // { [team]: {greeting, contact, faq} } 保護者ページ用のクラブ情報
       const [legacyGroupSettings, setLegacyGroupSettings] = useState({});
       const [isLoading, setIsLoading] = useState(true);
 
@@ -763,6 +764,7 @@
       const dirtyTeamRef = useRef(null);
       const saveTimerRef = useRef(null);
       const lastSentRef = useRef({}); // { [team]: jsonString } 自分が最後に送った内容（エコー判定用）
+      const publicInfoTimerRef = useRef(null);
 
       const isViewer = normalizeRole(profile.role) === 'viewer';
       const isAdmin = normalizeRole(profile.role) === 'admin';
@@ -780,11 +782,13 @@
             return;
           }
           const meta = {};
+          const publicInfoMap = {};
           setGlobalStore(prev => {
             const store = {};
             snapshot.forEach(doc => {
               const data = doc.data();
               meta[doc.id] = { updatedBy: data.updatedBy, updatedAt: data.updatedAt };
+              publicInfoMap[doc.id] = data.publicInfo || { greeting: '', contact: '', faq: [] };
               if (doc.id === dirtyTeamRef.current && prev && prev[doc.id]) {
                 store[doc.id] = prev[doc.id]; // 保存待ちの自分の編集内容を優先
               } else {
@@ -794,6 +798,7 @@
             return store;
           });
           setLastMeta(meta);
+          setTeamPublicInfoMap(publicInfoMap);
           setIsLoading(false);
         }, err => { console.error('購読エラー', err); setIsLoading(false); });
         return unsub;
@@ -847,23 +852,55 @@
         return unsub;
       }, [currentTeam]);
 
-      // ---- 通知: 他の指導者が今のチームを更新したら軽く知らせる ----
+      // ---- 通知: 他の指導者の更新をベル通知＋未読バッジで知らせる ----
+      // トーストだけだと連続更新時に見逃してしまうため、既読／未読を管理して
+      // 「いつでも見返せる」形にする（既読状態はチームごとにlocalStorageへ保存）
       const [toast, setToast] = useState(null);
+      const [notifOpen, setNotifOpen] = useState(false);
       const [photoUploading, setPhotoUploading] = useState(null); // アップロード中のtournament idx
       const [gameDayId, setGameDayId] = useState(null); // 大会当日モードで選択中の大会id
+      const [lastSeenMap, setLastSeenMap] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('kst_notif_seen') || '{}'); } catch (e) { return {}; }
+      });
       const seenMetaRef = useRef({});
+      const myName = profile.name || profile.email;
+
       useEffect(() => {
         const m = lastMeta[currentTeam];
         if (!m || !m.updatedAt || !m.updatedAt.toMillis) return;
         const millis = m.updatedAt.toMillis();
         const prevSeen = seenMetaRef.current[currentTeam];
-        const myName = profile.name || profile.email;
         if (prevSeen !== undefined && millis > prevSeen && m.updatedBy && m.updatedBy !== myName) {
           setToast(`${m.updatedBy} さんが「${currentTeam}」を更新しました`);
           setTimeout(() => setToast(null), 4000);
         }
         seenMetaRef.current[currentTeam] = millis;
       }, [lastMeta, currentTeam]);
+
+      const teamLastSeen = lastSeenMap[currentTeam] || 0;
+      const otherPeopleActivity = activityLog.filter(a => a.updatedBy && a.updatedBy !== myName && a.updatedAt && a.updatedAt.toMillis);
+      const unreadCount = otherPeopleActivity.filter(a => a.updatedAt.toMillis() > teamLastSeen).length;
+
+      const openNotifPanel = () => {
+        setNotifOpen(prev => !prev);
+        if (!notifOpen) {
+          const latest = otherPeopleActivity[0];
+          const seenAt = latest ? latest.updatedAt.toMillis() : Date.now();
+          setLastSeenMap(prev => {
+            const next = { ...prev, [currentTeam]: seenAt };
+            try { localStorage.setItem('kst_notif_seen', JSON.stringify(next)); } catch (e) {}
+            return next;
+          });
+        }
+      };
+
+      const formatRelativeTime = (ms) => {
+        const diff = Date.now() - ms;
+        if (diff < 60000) return '今';
+        if (diff < 3600000) return `${Math.floor(diff/60000)}分前`;
+        if (diff < 86400000) return `${Math.floor(diff/3600000)}時間前`;
+        return `${Math.floor(diff/86400000)}日前`;
+      };
 
       if (isLoading || !globalStore) {
         return <div className="flex flex-col justify-center items-center h-screen bg-slate-900 text-white"><div className="loader mb-4"></div><p className="font-bold">同期中...</p></div>;
@@ -935,6 +972,43 @@
       };
 
       const updateActiveGroup = (value) => updateStore(d => ({ ...d, activeGroup: value }));
+
+      // ---- 保護者ページ用のクラブ情報（ごあいさつ・連絡先・FAQ） ----
+      const currentPublicInfo = teamPublicInfoMap[currentTeam] || { greeting: '', contact: '', faq: [] };
+      const persistPublicInfo = (nextInfo) => {
+        if (publicInfoTimerRef.current) clearTimeout(publicInfoTimerRef.current);
+        publicInfoTimerRef.current = setTimeout(() => {
+          db.collection('teams').doc(currentTeam).set({ publicInfo: nextInfo }, { merge: true }).catch(() => {});
+          db.collection('publicCalendars').doc(currentTeam).set({ publicInfo: nextInfo, teamName: currentTeam, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(() => {});
+        }, 700);
+      };
+      const updatePublicInfo = (field, value) => {
+        if (isViewer) return;
+        const next = { ...currentPublicInfo, [field]: value };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      const addFaqItem = () => {
+        if (isViewer) return;
+        const next = { ...currentPublicInfo, faq: [...(currentPublicInfo.faq || []), { id: uid('faq'), q: '', a: '' }] };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      const updateFaqItem = (idx, field, value) => {
+        if (isViewer) return;
+        const arr = [...(currentPublicInfo.faq || [])];
+        arr[idx] = { ...arr[idx], [field]: value };
+        const next = { ...currentPublicInfo, faq: arr };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      const deleteFaqItem = (idx) => {
+        if (isViewer) return;
+        if (!window.confirm('このFAQを削除しますか？')) return;
+        const next = { ...currentPublicInfo, faq: (currentPublicInfo.faq || []).filter((_, i) => i !== idx) };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
 
       const handleUndo = () => {
         if (isViewer) return;
@@ -1172,6 +1246,35 @@
                 {isViewer && <span className="bg-gray-600 text-white text-[10px] font-black px-2 py-1 rounded uppercase"><i className="fas fa-eye mr-1"></i>閲覧のみ</span>}
                 <button onClick={handleUndo} disabled={history.length === 0 || isViewer} className={`text-xs font-bold px-3 py-1.5 rounded flex items-center gap-1 border ${(history.length === 0 || isViewer) ? 'bg-slate-700 text-slate-500 border-slate-600' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-500'}`}><i className="fas fa-undo-alt"></i></button>
                 <button onClick={() => window.print()} className="bg-slate-700 hover:bg-slate-600 text-white border border-slate-500 text-xs font-bold px-3 py-1.5 rounded" title="印刷"><i className="fas fa-print"></i></button>
+                <div className="relative">
+                  <button onClick={openNotifPanel} className="bg-slate-700 hover:bg-slate-600 text-white border border-slate-500 text-xs font-bold px-3 py-1.5 rounded relative" title="更新通知">
+                    <i className="fas fa-bell"></i>
+                    {unreadCount > 0 && <span className="absolute -top-1.5 -right-1.5 bg-rose-500 text-white text-[9px] font-black rounded-full w-4 h-4 flex items-center justify-center">{unreadCount > 9 ? '9+' : unreadCount}</span>}
+                  </button>
+                  {notifOpen && (
+                    <div className="absolute right-0 mt-2 w-72 bg-white text-gray-800 rounded-xl shadow-2xl border border-gray-200 z-[70] overflow-hidden">
+                      <div className="bg-gray-50 px-3 py-2 border-b border-gray-100 flex justify-between items-center">
+                        <span className="text-xs font-black text-gray-600"><i className="fas fa-bell text-amber-500 mr-1.5"></i>更新通知（{currentTeam}）</span>
+                        <button onClick={() => setNotifOpen(false)} className="text-gray-400 hover:text-gray-600 text-xs"><i className="fas fa-times"></i></button>
+                      </div>
+                      <div className="max-h-80 overflow-y-auto divide-y divide-gray-100">
+                        {activityLog.length === 0 && <div className="p-4 text-xs text-gray-400 text-center">まだ更新履歴がありません。</div>}
+                        {activityLog.slice(0, 15).map(a => {
+                          const isUnread = a.updatedBy !== myName && a.updatedAt && a.updatedAt.toMillis && a.updatedAt.toMillis() > teamLastSeen;
+                          return (
+                            <div key={a.id} className={`px-3 py-2.5 text-xs ${isUnread ? 'bg-amber-50' : ''}`}>
+                              <div className="flex justify-between items-start gap-2">
+                                <span className={`font-bold ${isUnread ? 'text-amber-700' : 'text-gray-700'}`}>{a.updatedBy || '?'}</span>
+                                <span className="text-gray-400 whitespace-nowrap">{a.updatedAt && a.updatedAt.toMillis ? formatRelativeTime(a.updatedAt.toMillis()) : ''}</span>
+                              </div>
+                              <div className="text-gray-500 mt-0.5">{a.bucket === '共通' ? 'チーム共通' : a.bucket} を更新 / {a.year}年度</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <div className="h-6 w-px bg-slate-600 mx-1"></div>
                 <select className="bg-slate-900 text-white border border-slate-600 font-bold text-sm p-1.5 rounded max-w-[120px] truncate" value={currentTeam} onChange={(e) => setCurrentTeam(e.target.value)}>
                   {visibleTeams.map(team => <option key={team} value={team}>{team}</option>)}
@@ -1525,6 +1628,36 @@
 
             {activeTab === 'parent' && (
               <div className="space-y-4 fade-in">
+                <div className="bg-white rounded-xl shadow-md border border-gray-200 p-4 space-y-4 no-print">
+                  <h2 className="text-sm font-black text-gray-800"><i className="fas fa-pen-to-square text-purple-500 mr-1.5"></i>保護者ページの内容を編集</h2>
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-500 block mb-1">ごあいさつ・指導方針</label>
+                    <textarea disabled={isViewer} value={currentPublicInfo.greeting} onChange={e => updatePublicInfo('greeting', e.target.value)} placeholder="例：保護者の皆様へ。当クラブでは○○を大切に指導しています。" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50 min-h-[80px] leading-relaxed"/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-500 block mb-1">連絡先（メール・LINE等）</label>
+                    <input disabled={isViewer} value={currentPublicInfo.contact} onChange={e => updatePublicInfo('contact', e.target.value)} placeholder="例：お問い合わせは kst.club@example.com まで" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50"/>
+                  </div>
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-[10px] font-bold text-gray-500">よくある質問（FAQ）</label>
+                      {!isViewer && <button onClick={addFaqItem} className="bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-bold px-2.5 py-1.5 rounded"><i className="fas fa-plus mr-1"></i>追加</button>}
+                    </div>
+                    <div className="space-y-2">
+                      {(currentPublicInfo.faq || []).map((item, idx) => (
+                        <div key={item.id} className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 space-y-1.5">
+                          <div className="flex gap-2 items-start">
+                            <input disabled={isViewer} value={item.q} onChange={e => updateFaqItem(idx, 'q', e.target.value)} placeholder="質問（例：会費はいくらですか？）" className="flex-grow border border-gray-200 rounded p-1.5 text-xs font-bold bg-white"/>
+                            {!isViewer && <button onClick={() => deleteFaqItem(idx)} className="text-gray-400 hover:text-red-500 px-1"><i className="fas fa-trash-alt"></i></button>}
+                          </div>
+                          <textarea disabled={isViewer} value={item.a} onChange={e => updateFaqItem(idx, 'a', e.target.value)} placeholder="回答" className="w-full border border-gray-200 rounded p-1.5 text-xs bg-white min-h-[50px]"/>
+                        </div>
+                      ))}
+                      {(currentPublicInfo.faq || []).length === 0 && <p className="text-[11px] text-gray-400">まだFAQが登録されていません。</p>}
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-gray-400"><i className="fas fa-info-circle mr-1"></i>この内容はチーム単位で保存され、保護者ページ（共有リンク）にそのまま表示されます。</p>
+                </div>
                 <div className="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
                   <div className="bg-slate-900 text-white p-4">
                     <div className="text-[10px] font-black text-slate-400">保護者向けに見える内容の確認</div>
@@ -1802,6 +1935,8 @@
       const eventsOnDay = (day) => datedEvents.filter(e => e.parsedDate.getFullYear() === gridYear && e.parsedDate.getMonth() === monthNum - 1 && e.parsedDate.getDate() === day);
       const theme = PUBLIC_BUCKET_THEME[activeBucket] || PUBLIC_BUCKET_THEME['共通'];
       const weekDayLabels = ['日','月','火','水','木','金','土'];
+      const publicInfo = data.publicInfo || {};
+      const seasonResults = bucketEvents.filter(t => t.result);
 
       return (
         <div className="min-h-screen bg-gray-100">
@@ -1812,6 +1947,12 @@
           </div>
 
           <div className="max-w-3xl mx-auto p-4 space-y-4">
+            {publicInfo.greeting && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
+                <div className="text-[11px] font-black text-gray-400 mb-1"><i className="fas fa-comment-dots mr-1.5"></i>ごあいさつ</div>
+                <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">{publicInfo.greeting}</p>
+              </div>
+            )}
             {buckets.length === 0 && <p className="text-center text-gray-400 text-sm py-10">まだ大会情報が登録されていません。</p>}
 
             {buckets.length > 0 && (
@@ -1885,7 +2026,44 @@
                     </div>
                   </div>
                 )}
+
+                {seasonResults.length > 0 && (
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-4">
+                    <div className="text-xs font-black text-gray-500 mb-3"><i className="fas fa-trophy text-amber-500 mr-1.5"></i>今シーズンの成績（{seasonResults.length}件）</div>
+                    <div className="divide-y divide-gray-100">
+                      {seasonResults.map((t, i) => (
+                        <button key={i} onClick={() => setDetailEvents([t])} className="w-full text-left py-2.5 flex flex-col gap-0.5">
+                          <div className="flex justify-between items-baseline gap-2">
+                            <span className="font-bold text-gray-800 text-sm truncate">{t.name}</span>
+                            <span className="text-[10px] text-gray-400 whitespace-nowrap">{t.month} {t.date && t.date !== '日程確定後記入' ? t.date : ''}</span>
+                          </div>
+                          <span className="text-emerald-600 text-xs font-bold">{t.result}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </>
+            )}
+
+            {(publicInfo.faq || []).length > 0 && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-4">
+                <div className="text-xs font-black text-gray-500 mb-3"><i className="fas fa-circle-question text-blue-500 mr-1.5"></i>よくある質問</div>
+                <div className="divide-y divide-gray-100">
+                  {publicInfo.faq.map((item, i) => (
+                    <details key={item.id || i} className="py-2.5">
+                      <summary className="font-bold text-gray-800 text-sm cursor-pointer">{item.q || '（質問未入力）'}</summary>
+                      <p className="text-xs text-gray-600 mt-2 whitespace-pre-wrap leading-relaxed">{item.a || '（回答未入力）'}</p>
+                    </details>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {publicInfo.contact && (
+              <div className="text-center text-xs text-gray-400 font-bold py-2">
+                <i className="fas fa-envelope mr-1.5"></i>{publicInfo.contact}
+              </div>
             )}
           </div>
 
