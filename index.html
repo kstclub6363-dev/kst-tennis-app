@@ -978,6 +978,7 @@
       const [photoUploading, setPhotoUploading] = useState(null); // アップロード中のtournament idx
       const [gameDayId, setGameDayId] = useState(null); // 大会当日モードで選択中の大会id
       const [calendarMonth, setCalendarMonth] = useState(null); // カレンダータブで表示中の月
+      const [scheduleEditMonth, setScheduleEditMonth] = useState(null); // 保護者表示タブで編集中の月
       const headerRef = useRef(null);
       const [headerHeight, setHeaderHeight] = useState(210); // ヘッダーの実際の高さを測って本文の余白に反映（スマホでボタンが増えて折り返ると固定値では隙間が合わなくなるため）
       const [dayModal, setDayModal] = useState(null); // { day, month, idxs } タップした日の予定編集
@@ -1190,6 +1191,26 @@
         setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
         persistPublicInfo(next);
       };
+      // 「特定の日だけの例外」は、月ごとの通常ルールとは別に扱う（dates を持つルールだけを例外として一覧表示する）
+      const scheduleExceptionEntries = () => scheduleRulesOf(currentPublicInfo.defaultSchedule)
+        .map((rule, i) => ({ rule, i }))
+        .filter(({ rule }) => Array.isArray(rule.dates) && rule.dates.length > 0);
+      const addScheduleException = () => {
+        if (isViewer) return;
+        const rules = [...scheduleRulesOf(currentPublicInfo.defaultSchedule), { months: [], weeks: [], weekdays: [], dates: [''], text: '' }];
+        const next = { ...currentPublicInfo, defaultSchedule: rules };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
+      const updateExceptionDate = (idx, value) => {
+        if (isViewer) return;
+        lastEditAtRef.current[currentTeam] = Date.now();
+        const rules = [...scheduleRulesOf(currentPublicInfo.defaultSchedule)];
+        rules[idx] = { ...rules[idx], dates: [value.trim()] };
+        const next = { ...currentPublicInfo, defaultSchedule: rules };
+        setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
+        persistPublicInfo(next);
+      };
       const deleteScheduleRule = (idx) => {
         if (isViewer) return;
         const rules = scheduleRulesOf(currentPublicInfo.defaultSchedule).filter((_, i) => i !== idx);
@@ -1205,7 +1226,7 @@
         const rules = [...scheduleRulesOf(currentPublicInfo.defaultSchedule)];
         const idx = rules.findIndex(r => Array.isArray(r.months) && r.months.length === 1 && r.months[0] === monthLabel);
         if (idx >= 0) rules[idx] = { ...rules[idx], [field]: value };
-        else rules.push({ months: [monthLabel], weekdays: [], text: '', [field]: value });
+        else rules.unshift({ months: [monthLabel], weeks: [], weekdays: [], dates: [], text: '', [field]: value });
         const next = { ...currentPublicInfo, defaultSchedule: rules };
         setTeamPublicInfoMap(prev => ({ ...prev, [currentTeam]: next }));
         persistPublicInfo(next);
@@ -1932,7 +1953,7 @@
                           if (day === null) return <div key={i}></div>;
                           const evs = calEventsOnDay(day);
                           const isToday = calGridYear === todayForCal.getFullYear() && calMonthNum - 1 === todayForCal.getMonth() && day === todayForCal.getDate();
-                          const dayRoutineRule = evs.length === 0 ? resolveRoutineForDate(currentPublicInfo.defaultSchedule, calActiveMonth, day, new Date(calGridYear, calMonthNum - 1, day)) : null;
+                          const dayRoutineRule = resolveRoutineForDate(currentPublicInfo.defaultSchedule, calActiveMonth, day, new Date(calGridYear, calMonthNum - 1, day));
                           const isRoutineDay = !!dayRoutineRule;
                           const dayRoutineLabel = dayRoutineRule ? ruleCalendarLabel(dayRoutineRule) : '';
                           const cellColorClass = evs.length === 1
@@ -2086,51 +2107,54 @@
                     <textarea disabled={isViewer} value={currentPublicInfo.greeting} onChange={e => updatePublicInfo('greeting', e.target.value)} placeholder="例：保護者の皆様へ。当クラブでは○○を大切に指導しています。" className="w-full border border-gray-200 rounded-lg p-2.5 text-xs bg-gray-50 min-h-[80px] leading-relaxed"/>
                   </div>
                   <div>
-                    <div className="flex justify-between items-center mb-1">
-                      <label className="text-[10px] font-bold text-gray-500">通常練習の時間（月ごとに設定できます）</label>
-                      {!isViewer && <button onClick={addScheduleRule} className="bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold px-2.5 py-1.5 rounded"><i className="fas fa-plus mr-1"></i>ルール追加</button>}
-                    </div>
-                    <div className="space-y-2">
-                      {scheduleRulesOf(currentPublicInfo.defaultSchedule).map((rule, idx) => (
-                        <div key={idx} className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 space-y-2">
-                          <div>
-                            <p className="text-[10px] font-bold text-gray-400 mb-1">対象月（選ばなければ他ルールが無い月すべてに適用）</p>
-                            <div className="flex flex-wrap gap-1">
-                              {monthLabels.map(m => (
-                                <button key={m} type="button" disabled={isViewer} onClick={() => toggleScheduleRuleMonth(idx, m)} className={`text-[10px] font-bold px-1.5 py-1 rounded ${(rule.months || []).includes(m) ? 'bg-blue-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}>{m}</button>
-                              ))}
-                            </div>
-                          </div>
-                          <div>
-                            <p className="text-[10px] font-bold text-gray-400 mb-1">曜日</p>
+                    <label className="text-[10px] font-bold text-gray-500 block mb-2">通常練習の時間</label>
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 space-y-2">
+                      <div className="flex flex-wrap gap-1">
+                        {monthLabels.map(m => (
+                          <button key={m} type="button" onClick={() => setScheduleEditMonth(m)} className={`text-[11px] font-bold px-2 py-1 rounded-full ${(scheduleEditMonth || monthLabels[0]) === m ? 'bg-blue-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}>{m}</button>
+                        ))}
+                      </div>
+                      {(() => {
+                        const editMonth = scheduleEditMonth || monthLabels[0];
+                        const editRule = resolveScheduleRuleForMonth(currentPublicInfo.defaultSchedule, editMonth);
+                        return (
+                          <>
+                            <p className="text-[10px] font-bold text-blue-500">{editMonth}の設定</p>
                             <div className="flex flex-wrap gap-1">
                               {WEEKDAY_LABELS_FULL.map((w, dNum) => (
-                                <button key={w} type="button" disabled={isViewer} onClick={() => toggleScheduleRuleWeekday(idx, dNum)} className={`w-7 h-7 rounded-full text-xs font-black ${ruleWeekdays(rule).includes(dNum) ? 'bg-teal-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}>{w}</button>
+                                <button key={w} type="button" disabled={isViewer} onClick={() => updateScheduleForMonth(editMonth, 'weekdays', (editRule && ruleWeekdays(editRule).includes(dNum)) ? ruleWeekdays(editRule).filter(d => d !== dNum) : [...(editRule ? ruleWeekdays(editRule) : []), dNum].sort())} className={`w-8 h-8 rounded-full text-xs font-black ${(editRule && ruleWeekdays(editRule).includes(dNum)) ? 'bg-teal-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}>{w}</button>
                               ))}
                             </div>
-                          </div>
-                          <div>
-                            <p className="text-[10px] font-bold text-gray-400 mb-1">週（選ばなければ毎週）</p>
                             <div className="flex flex-wrap gap-1">
                               {WEEK_OF_MONTH_LABELS.map((w, wi) => (
-                                <button key={w} type="button" disabled={isViewer} onClick={() => toggleScheduleRuleWeek(idx, wi + 1)} className={`text-[10px] font-bold px-2 py-1 rounded ${(rule.weeks || []).includes(wi + 1) ? 'bg-purple-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}>{w}</button>
+                                <button key={w} type="button" disabled={isViewer} onClick={() => updateScheduleForMonth(editMonth, 'weeks', (editRule && (editRule.weeks || []).includes(wi + 1)) ? (editRule.weeks || []).filter(x => x !== wi + 1) : [...((editRule && editRule.weeks) || []), wi + 1].sort())} className={`text-[10px] font-bold px-2 py-1 rounded ${(editRule && (editRule.weeks || []).includes(wi + 1)) ? 'bg-purple-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}>{w}</button>
                               ))}
                             </div>
-                          </div>
-                          <div className="flex gap-2">
-                            <input disabled={isViewer} value={rule.text} onChange={e => updateScheduleRule(idx, 'text', e.target.value)} placeholder="例：放課後練習 16:00〜18:00" className="flex-grow border border-gray-200 rounded p-2.5 text-sm font-bold bg-white text-gray-900"/>
-                            {!isViewer && <button onClick={() => deleteScheduleRule(idx)} className="text-gray-400 hover:text-red-500 px-1"><i className="fas fa-trash-alt"></i></button>}
-                          </div>
-                          <div>
-                            <p className="text-[10px] font-bold text-gray-400 mb-1">特定の日だけの例外（任意・例：7/15, 7/22）</p>
-                            <input disabled={isViewer} defaultValue={(rule.dates || []).join(', ')} onBlur={e => updateScheduleRuleDatesText(idx, e.target.value)} placeholder="例：7/15, 7/22" className="w-full border border-gray-200 rounded p-2 text-xs bg-white"/>
-                            <p className="text-[10px] text-gray-400 mt-0.5">ここに日付を入れると、曜日・週の設定より優先してその日だけこの内容が表示されます。</p>
-                          </div>
-                        </div>
-                      ))}
-                      {scheduleRulesOf(currentPublicInfo.defaultSchedule).length === 0 && <p className="text-[11px] text-gray-400">まだ設定されていません。</p>}
+                            <input disabled={isViewer} value={(editRule && editRule.text) || ''} onChange={e => updateScheduleForMonth(editMonth, 'text', e.target.value)} placeholder="例：放課後練習 16:00〜18:00" className="w-full border border-gray-200 rounded-lg p-2.5 text-sm font-bold bg-white text-gray-900"/>
+                            <p className="text-[10px] text-gray-400">週を選ばなければ毎週、この内容がそのまま反映されます。</p>
+                          </>
+                        );
+                      })()}
                     </div>
-                    <p className="text-[10px] text-gray-400 mt-1">毎回の通常練習はカレンダーには入れず、ここで設定してください。時間が変わる日（テスト期間・懇談・長期休みなど）だけカレンダーに個別に登録すれば、色だらけにならずに済みます。カレンダータブの各月表示からも直接編集できます。</p>
+
+                    <div className="mt-3">
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="text-[10px] font-bold text-gray-500">特定の日だけの例外（任意）</label>
+                        {!isViewer && <button onClick={addScheduleException} className="bg-gray-600 hover:bg-gray-500 text-white text-[11px] font-bold px-2.5 py-1.5 rounded"><i className="fas fa-plus mr-1"></i>例外を追加</button>}
+                      </div>
+                      <div className="space-y-2">
+                        {scheduleExceptionEntries().map(({ rule, i }) => (
+                          <div key={i} className="flex gap-2 items-center bg-gray-50 border border-gray-200 rounded-lg p-2">
+                            <input disabled={isViewer} defaultValue={(rule.dates || [])[0] || ''} onBlur={e => updateExceptionDate(i, e.target.value)} placeholder="例：7/15" className="w-20 border border-gray-200 rounded p-2 text-xs bg-white text-center"/>
+                            <input disabled={isViewer} value={rule.text} onChange={e => updateScheduleRule(i, 'text', e.target.value)} placeholder="この日の内容（例：休み）" className="flex-grow border border-gray-200 rounded p-2 text-xs bg-white"/>
+                            {!isViewer && <button onClick={() => deleteScheduleRule(i)} className="text-gray-400 hover:text-red-500 px-1"><i className="fas fa-trash-alt"></i></button>}
+                          </div>
+                        ))}
+                        {scheduleExceptionEntries().length === 0 && <p className="text-[11px] text-gray-400">まだ設定されていません。</p>}
+                      </div>
+                      <p className="text-[10px] text-gray-400 mt-1">特定の1日だけ内容を変えたい時に使います（例：懇談の日だけ休み）。曜日・週の設定より優先されます。</p>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-2">毎回の通常練習はカレンダーには入れず、ここで設定してください。カレンダータブの各月表示からも直接編集できます。</p>
                   </div>
                   <div>
                     <label className="text-[10px] font-bold text-gray-500 block mb-1">連絡先（メール・LINE等）</label>
@@ -2517,7 +2541,7 @@
                       if (day === null) return <div key={i}></div>;
                       const evs = eventsOnDay(day);
                       const isToday = gridYear === today.getFullYear() && monthNum - 1 === today.getMonth() && day === today.getDate();
-                      const dayRoutineRule = evs.length === 0 ? resolveRoutineForDate(publicInfo.defaultSchedule, activeMonth, day, new Date(gridYear, monthNum - 1, day)) : null;
+                      const dayRoutineRule = resolveRoutineForDate(publicInfo.defaultSchedule, activeMonth, day, new Date(gridYear, monthNum - 1, day));
                       const isRoutineDay = !!dayRoutineRule;
                       const dayRoutineLabel = dayRoutineRule ? ruleCalendarLabel(dayRoutineRule) : '';
                       const cellColorClass = evs.length === 1
