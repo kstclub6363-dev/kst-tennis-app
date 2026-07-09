@@ -2571,20 +2571,6 @@ ${rowsHtml}
           </div>
 
           <div className="max-w-3xl mx-auto p-4 space-y-4">
-            {scheduleRulesOf(publicInfo.defaultSchedule).length > 0 && (
-              <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
-                <div className="text-xs font-black text-blue-500 mb-2"><i className="fas fa-clock mr-1.5"></i>通常練習の時間</div>
-                <div className="space-y-2">
-                  {scheduleRulesOf(publicInfo.defaultSchedule).map((rule, i) => (
-                    <div key={i} className="flex flex-col sm:flex-row sm:items-baseline gap-1">
-                      {rule.months && rule.months.length > 0 && <span className="text-xs font-black text-blue-500 whitespace-nowrap">{rule.months.join('・')}：</span>}
-                      <span className="text-lg text-black font-black whitespace-pre-wrap leading-relaxed">{rule.text}</span>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-[10px] text-blue-400 mt-2">※時間が変わる日はカレンダーに個別に表示されます</p>
-              </div>
-            )}
             {publicInfo.greeting && (
               <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
                 <div className="text-[11px] font-black text-gray-400 mb-1"><i className="fas fa-comment-dots mr-1.5"></i>ごあいさつ</div>
