@@ -12,6 +12,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
@@ -345,6 +346,49 @@
 
     const downloadBlob = (filename, content, type) => {
       const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+    };
+
+    // ================= 予定表の書き出し（Excel / Word / 印刷=PDF保存） =================
+    const WEEKDAY_KANJI = ['日', '月', '火', '水', '木', '金', '土'];
+    const buildScheduleRows = (entries) => entries.map(t => ({
+      date: t.date || '未定',
+      weekday: t.parsedDate ? WEEKDAY_KANJI[t.parsedDate.getDay()] : '',
+      month: t.month || '',
+      type: t.eventType || guessEventType(t),
+      name: t.name || '',
+      place: t.place || '',
+      time: t.time || '',
+      org: t.org === '地域クラブ' ? '地域クラブ' : '学校部活',
+      notice: [t.meeting ? `集合:${t.meeting}` : '', t.belongings ? `持ち物:${t.belongings}` : '', t.notice || ''].filter(Boolean).join(' / ')
+    }));
+    const SCHEDULE_HEADER = ['月', '日付', '曜日', '種別', '題名', '場所', '時間', '主催', 'メモ'];
+    const exportScheduleExcel = (entries, filename, sheetTitle) => {
+      const rows = buildScheduleRows(entries);
+      const data = [SCHEDULE_HEADER, ...rows.map(r => [r.month, r.date, r.weekday, r.type, r.name, r.place, r.time, r.org, r.notice])];
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      ws['!cols'] = [{ wch: 6 }, { wch: 8 }, { wch: 5 }, { wch: 10 }, { wch: 26 }, { wch: 20 }, { wch: 14 }, { wch: 10 }, { wch: 36 }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, (sheetTitle || '予定').slice(0, 31));
+      XLSX.writeFile(wb, filename);
+    };
+    const exportScheduleWord = (entries, filename, title) => {
+      const rows = buildScheduleRows(entries);
+      const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const rowsHtml = rows.map(r => `<tr><td>${esc(r.month)}</td><td>${esc(r.date)}</td><td>${esc(r.weekday)}</td><td>${esc(r.type)}</td><td>${esc(r.name)}</td><td>${esc(r.place)}</td><td>${esc(r.time)}</td><td>${esc(r.org)}</td><td>${esc(r.notice)}</td></tr>`).join('');
+      const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><title>${esc(title)}</title></head>
+<body style="font-family:'Meiryo','Hiragino Kaku Gothic ProN',sans-serif;">
+<h2>${esc(title)}</h2>
+<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;font-size:11pt;">
+<tr style="background:#eee;font-weight:bold;"><td>月</td><td>日付</td><td>曜日</td><td>種別</td><td>題名</td><td>場所</td><td>時間</td><td>主催</td><td>メモ</td></tr>
+${rowsHtml}
+</table>
+</body></html>`;
+      const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = filename; document.body.appendChild(a); a.click();
@@ -983,6 +1027,8 @@
       const [headerHeight, setHeaderHeight] = useState(210); // ヘッダーの実際の高さを測って本文の余白に反映（スマホでボタンが増えて折り返ると固定値では隙間が合わなくなるため）
       const [dayModal, setDayModal] = useState(null); // { day, month, idxs } タップした日の予定編集
       const [yearMgmtOpen, setYearMgmtOpen] = useState(false);
+      const [exportModalOpen, setExportModalOpen] = useState(false);
+      const [exportScope, setExportScope] = useState('month'); // 'month' | 'year'
       const [newYearInput, setNewYearInput] = useState('');
       const [lastSeenMap, setLastSeenMap] = useState(() => {
         try { return JSON.parse(localStorage.getItem('kst_notif_seen') || '{}'); } catch (e) { return {}; }
@@ -1396,6 +1442,19 @@
         const csv = rows.map(r => r.map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
         downloadBlob(`${currentTeam}_${currentBucket}_大会一覧.csv`, '\uFEFF' + csv, 'text/csv');
       };
+      const exportScopeLabel = exportScope === 'month' ? exportMonthLabel : `${actualYear}年度`;
+      const exportTournamentsExcel = () => {
+        exportScheduleExcel(exportScopedEntries, `${currentTeam}_${currentBucket}_${exportScopeLabel}_予定.xlsx`, `${currentTeam} ${currentBucket}`);
+        setExportModalOpen(false);
+      };
+      const exportTournamentsWord = () => {
+        exportScheduleWord(exportScopedEntries, `${currentTeam}_${currentBucket}_${exportScopeLabel}_予定.doc`, `${currentTeam} ${currentBucket} ${exportScopeLabel} 予定`);
+        setExportModalOpen(false);
+      };
+      const exportTournamentsPrint = () => {
+        setExportModalOpen(false);
+        setTimeout(() => window.print(), 150);
+      };
 
       // ---- 保護者向け共有リンク ----
       const publicLinkUrl = `${window.location.origin}${window.location.pathname}?public=1&team=${encodeURIComponent(currentTeam)}`;
@@ -1507,6 +1566,9 @@
       const monthLabels = ['4月','5月','6月','7月','8月','9月','10月','11月','12月','1月','2月','3月'];
       const eventsByMonth = monthLabels.map(label => ({ label, events: datedEvents.filter(e => String(e.month || '').includes(label.replace('月','')) || String(e.month || '') === label) }));
       const updateTournamentExtra = (idx, field, value) => updateTournament(idx, field, value);
+      // 出力（Excel/Word/PDF）モーダルで「この月だけ」を選んだ時に使う、今表示中とみなす月
+      const exportMonthLabel = (calendarMonth && monthLabels.includes(calendarMonth)) ? calendarMonth : (nextEvent ? monthLabels.find(l => l.replace('月','') === String(nextEvent.parsedDate.getMonth() + 1)) : monthLabels[0]);
+      const exportScopedEntries = exportScope === 'month' ? sortedTournamentEntries.filter(t => String(t.month || '').includes(exportMonthLabel.replace('月',''))) : sortedTournamentEntries;
 
       // ---- 練習中モード：今日の出欠セッションを探す（無ければ「開始」ボタンで作成） ----
       const todaysSessionIdx = (currentData.sessions || []).findIndex(s => s.date === todayISO);
@@ -1657,10 +1719,42 @@
             </div>
           )}
 
+          {exportModalOpen && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-[80] no-print" onClick={() => setExportModalOpen(false)}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
+                <div className="p-4 space-y-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-base font-black text-gray-800">予定を出力</span>
+                    <button onClick={() => setExportModalOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg"><i className="fas fa-times"></i></button>
+                  </div>
+                  <p className="text-xs text-gray-500">{currentTeam}（{currentBucket === '共通' ? 'チーム共通' : currentBucket}）の予定を出力します。</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => setExportScope('month')} className={`flex-1 text-sm font-bold py-2 rounded-lg border-2 ${exportScope === 'month' ? `${theme.bg} text-white border-transparent` : 'bg-white text-gray-400 border-gray-200'}`}>{exportMonthLabel}だけ</button>
+                    <button onClick={() => setExportScope('year')} className={`flex-1 text-sm font-bold py-2 rounded-lg border-2 ${exportScope === 'year' ? `${theme.bg} text-white border-transparent` : 'bg-white text-gray-400 border-gray-200'}`}>{actualYear}年度 全部</button>
+                  </div>
+                  <div className="space-y-2">
+                    <button onClick={exportTournamentsExcel} className="w-full flex items-center gap-3 border-2 border-gray-200 hover:border-emerald-400 hover:bg-emerald-50 rounded-xl p-3 text-left transition-colors">
+                      <i className="fas fa-file-excel text-emerald-600 text-xl w-6 text-center"></i>
+                      <span className="font-bold text-gray-800 text-sm">エクセルで出力（.xlsx）</span>
+                    </button>
+                    <button onClick={exportTournamentsWord} className="w-full flex items-center gap-3 border-2 border-gray-200 hover:border-blue-400 hover:bg-blue-50 rounded-xl p-3 text-left transition-colors">
+                      <i className="fas fa-file-word text-blue-600 text-xl w-6 text-center"></i>
+                      <span className="font-bold text-gray-800 text-sm">ワードで出力（.doc）</span>
+                    </button>
+                    <button onClick={exportTournamentsPrint} className="w-full flex items-center gap-3 border-2 border-gray-200 hover:border-gray-400 hover:bg-gray-50 rounded-xl p-3 text-left transition-colors">
+                      <i className="fas fa-print text-gray-700 text-xl w-6 text-center"></i>
+                      <span className="font-bold text-gray-800 text-sm">PDFで出力（印刷画面から保存）</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <main className="flex-grow max-w-7xl w-full mx-auto p-4 pb-12" style={{ paddingTop: `${headerHeight + 16}px` }}>
 
             <div className="hidden print-only mb-6 text-center border-b-2 border-gray-800 pb-4">
-              <h1 className="text-2xl font-black">【{currentTeam}】 {actualYear}年度 {currentBucket === '共通' ? 'チーム共通' : currentBucket + 'チーム'} 育成システム</h1>
+              <h1 className="text-2xl font-black">【{currentTeam}】 {activeTab === 'calendar' ? (exportScope === 'month' ? `${actualYear}年度 ${exportMonthLabel} 月間予定` : `${actualYear}年度 予定一覧`) : `${actualYear}年度 ${currentBucket === '共通' ? 'チーム共通' : currentBucket + 'チーム'} 育成システム`}</h1>
             </div>
 
             {['plan', 'practice', 'reflection'].includes(activeTab) && (
@@ -1883,6 +1977,7 @@
                   <div className="flex flex-wrap gap-2">
                     <button onClick={exportTeamJson} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-file-download mr-1"></i>この年度をJSONで書き出す</button>
                     <button onClick={exportTournamentsCsv} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-file-csv mr-1"></i>大会一覧をCSVで書き出す</button>
+                    <button onClick={() => setExportModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-file-export mr-1"></i>予定を出力（Excel/Word/PDF）</button>
                     <button onClick={copyPublicLink} className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-2 rounded"><i className="fas fa-link mr-1"></i>保護者向け共有リンクを発行</button>
                   </div>
                   <p className="text-[10px] text-gray-400 mt-2">※共有リンクは大会カレンダー（結果を含む）のみを表示し、育成計画や振り返りなどの内部情報は含まれません。ログイン不要で誰でも閲覧できます。</p>
@@ -1897,7 +1992,7 @@
                   <div className="flex flex-wrap gap-2">
                     <select className="border text-xs font-bold p-1 rounded bg-gray-50" value={selectedGroup} onChange={(e)=>setSelectedGroup(e.target.value)}>{groupList.map(g => <option key={g.id} value={g.id}>追加先: {g.name}</option>)}</select>
                     <button onClick={addTournament} disabled={isViewer} className={`${theme.bg} ${theme.hover} disabled:opacity-40 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors`}><i className="fas fa-plus mr-1"></i>大会追加</button>
-                    <button onClick={exportTournamentsCsv} className="bg-gray-600 hover:bg-gray-500 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors"><i className="fas fa-file-csv mr-1"></i>CSV書き出し</button>
+                    <button onClick={() => setExportModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors"><i className="fas fa-file-export mr-1"></i>出力</button>
                   </div>
                 </div>
 
@@ -2394,6 +2489,8 @@
       const [selectedBucket, setSelectedBucket] = useState(null);
       const [selectedMonth, setSelectedMonth] = useState(null); // '4月' 等
       const [detailEvents, setDetailEvents] = useState(null); // クリックした日の予定一覧（モーダル表示用）
+      const [exportModalOpen, setExportModalOpen] = useState(false);
+      const [exportScope, setExportScope] = useState('month'); // 'month' | 'year'
 
       useEffect(() => {
         const unsub = db.collection('publicCalendars').doc(teamName).onSnapshot(
@@ -2462,6 +2559,8 @@
       const weekDayLabels = ['日','月','火','水','木','金','土'];
       const publicInfo = data.publicInfo || {};
       const seasonResults = datedEvents.filter(t => t.result).slice().sort((a, b) => a.parsedDate - b.parsedDate);
+      const exportableEvents = datedEvents.slice().sort((a, b) => a.parsedDate - b.parsedDate).concat(undatedEvents);
+      const exportScopedEvents = exportScope === 'month' ? exportableEvents.filter(t => String(t.month || '').includes(activeMonth.replace('月',''))) : exportableEvents;
 
       return (
         <div className="min-h-screen bg-gray-100">
@@ -2506,6 +2605,12 @@
                     </button>
                   );
                 })}
+              </div>
+            )}
+
+            {activeBucket && exportableEvents.length > 0 && (
+              <div className="flex justify-center no-print">
+                <button onClick={() => setExportModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs px-4 py-2.5 rounded-lg"><i className="fas fa-file-export mr-1.5"></i>予定を出力（Excel/Word/PDF）</button>
               </div>
             )}
 
@@ -2655,6 +2760,38 @@
                       {t.result && <div className="text-emerald-700 font-bold mt-2 bg-emerald-50 border border-emerald-100 rounded-lg p-3"><i className="fas fa-trophy mr-1.5"></i>{t.result}</div>}
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {exportModalOpen && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 no-print" onClick={() => setExportModalOpen(false)}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
+                <div className="p-4 space-y-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-base font-black text-gray-800">予定を出力</span>
+                    <button onClick={() => setExportModalOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg"><i className="fas fa-times"></i></button>
+                  </div>
+                  <p className="text-xs text-gray-500">{teamName}（{activeBucket === '共通' ? 'チーム共通' : activeBucket}）の予定を出力します。</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => setExportScope('month')} className={`flex-1 text-sm font-bold py-2 rounded-lg border-2 ${exportScope === 'month' ? 'bg-blue-600 text-white border-transparent' : 'bg-white text-gray-400 border-gray-200'}`}>{activeMonth}だけ</button>
+                    <button onClick={() => setExportScope('year')} className={`flex-1 text-sm font-bold py-2 rounded-lg border-2 ${exportScope === 'year' ? 'bg-blue-600 text-white border-transparent' : 'bg-white text-gray-400 border-gray-200'}`}>全部</button>
+                  </div>
+                  <div className="space-y-2">
+                    <button onClick={() => { exportScheduleExcel(exportScopedEvents, `${teamName}_${activeBucket}_予定.xlsx`, `${teamName} ${activeBucket}`); setExportModalOpen(false); }} className="w-full flex items-center gap-3 border-2 border-gray-200 hover:border-emerald-400 hover:bg-emerald-50 rounded-xl p-3 text-left transition-colors">
+                      <i className="fas fa-file-excel text-emerald-600 text-xl w-6 text-center"></i>
+                      <span className="font-bold text-gray-800 text-sm">エクセルで出力（.xlsx）</span>
+                    </button>
+                    <button onClick={() => { exportScheduleWord(exportScopedEvents, `${teamName}_${activeBucket}_予定.doc`, `${teamName} ${activeBucket} 予定`); setExportModalOpen(false); }} className="w-full flex items-center gap-3 border-2 border-gray-200 hover:border-blue-400 hover:bg-blue-50 rounded-xl p-3 text-left transition-colors">
+                      <i className="fas fa-file-word text-blue-600 text-xl w-6 text-center"></i>
+                      <span className="font-bold text-gray-800 text-sm">ワードで出力（.doc）</span>
+                    </button>
+                    <button onClick={() => { setExportModalOpen(false); setTimeout(() => window.print(), 150); }} className="w-full flex items-center gap-3 border-2 border-gray-200 hover:border-gray-400 hover:bg-gray-50 rounded-xl p-3 text-left transition-colors">
+                      <i className="fas fa-print text-gray-700 text-xl w-6 text-center"></i>
+                      <span className="font-bold text-gray-800 text-sm">PDFで出力（印刷画面から保存）</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
