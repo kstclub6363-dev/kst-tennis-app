@@ -354,31 +354,44 @@
 
     // ================= 予定表の書き出し（Excel / Word / 印刷=PDF保存） =================
     const WEEKDAY_KANJI = ['日', '月', '火', '水', '木', '金', '土'];
-    const buildScheduleRows = (entries) => entries.map(t => ({
-      date: t.date || '未定',
-      weekday: t.parsedDate ? WEEKDAY_KANJI[t.parsedDate.getDay()] : '',
-      month: t.month || '',
-      type: t.eventType || guessEventType(t),
-      name: t.name || '',
-      place: t.place || '',
-      time: t.time || '',
-      org: t.org === '地域クラブ' ? '地域クラブ' : '学校部活',
-      notice: [t.meeting ? `集合:${t.meeting}` : '', t.belongings ? `持ち物:${t.belongings}` : '', t.notice || ''].filter(Boolean).join(' / ')
-    }));
+    const buildScheduleRows = (entries) => entries.map(t => {
+      const noticeParts = [];
+      if (t.meeting) noticeParts.push(`集合：${t.meeting}`);
+      if (t.belongings) noticeParts.push(`持ち物：${t.belongings}`);
+      if (t.notice) noticeParts.push(t.notice);
+      return {
+        date: t.date || '未定',
+        weekday: t.parsedDate ? WEEKDAY_KANJI[t.parsedDate.getDay()] : '',
+        month: t.month || '',
+        type: t.eventType || guessEventType(t),
+        name: t.name || '',
+        place: t.place || '',
+        time: t.time || '',
+        org: t.org === '地域クラブ' ? '地域クラブ' : '学校部活',
+        noticeParts,
+        notice: noticeParts.join('\n')
+      };
+    });
     const SCHEDULE_HEADER = ['月', '日付', '曜日', '種別', '題名', '場所', '時間', '主催', 'メモ'];
     const exportScheduleExcel = (entries, filename, sheetTitle) => {
       const rows = buildScheduleRows(entries);
       const data = [SCHEDULE_HEADER, ...rows.map(r => [r.month, r.date, r.weekday, r.type, r.name, r.place, r.time, r.org, r.notice])];
       const ws = XLSX.utils.aoa_to_sheet(data);
       ws['!cols'] = [{ wch: 6 }, { wch: 8 }, { wch: 5 }, { wch: 10 }, { wch: 26 }, { wch: 20 }, { wch: 14 }, { wch: 10 }, { wch: 36 }];
+      // メモ欄は集合・持ち物・連絡事項を改行で分けているため、セルの折り返し表示をオンにしておく
+      const range = XLSX.utils.decode_range(ws['!ref']);
+      for (let r = 1; r <= range.e.r; r++) {
+        const cellRef = XLSX.utils.encode_cell({ r, c: 8 });
+        if (ws[cellRef]) ws[cellRef].s = { alignment: { wrapText: true, vertical: 'top' } };
+      }
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, (sheetTitle || '予定').slice(0, 31));
-      XLSX.writeFile(wb, filename);
+      XLSX.writeFile(wb, filename, { cellStyles: true });
     };
     const exportScheduleWord = (entries, filename, title) => {
       const rows = buildScheduleRows(entries);
       const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const rowsHtml = rows.map(r => `<tr><td>${esc(r.month)}</td><td>${esc(r.date)}</td><td>${esc(r.weekday)}</td><td>${esc(r.type)}</td><td>${esc(r.name)}</td><td>${esc(r.place)}</td><td>${esc(r.time)}</td><td>${esc(r.org)}</td><td>${esc(r.notice)}</td></tr>`).join('');
+      const rowsHtml = rows.map(r => `<tr><td>${esc(r.month)}</td><td>${esc(r.date)}</td><td>${esc(r.weekday)}</td><td>${esc(r.type)}</td><td>${esc(r.name)}</td><td>${esc(r.place)}</td><td>${esc(r.time)}</td><td>${esc(r.org)}</td><td>${r.noticeParts.map(esc).join('<br/>')}</td></tr>`).join('');
       const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
 <head><meta charset="utf-8"><title>${esc(title)}</title></head>
 <body style="font-family:'Meiryo','Hiragino Kaku Gothic ProN',sans-serif;">
@@ -2200,7 +2213,7 @@ ${rowsHtml}
                     <tbody>
                       {buildScheduleRows(exportScopedEntries).map((r, i) => (
                         <tr key={i} className="border-b border-gray-300">
-                          <td className="p-2">{r.date}</td><td className="p-2">{r.weekday}</td><td className="p-2">{r.type}</td><td className="p-2">{r.name}</td><td className="p-2">{r.place}</td><td className="p-2">{r.time}</td><td className="p-2">{r.org}</td><td className="p-2">{r.notice}</td>
+                          <td className="p-2">{r.date}</td><td className="p-2">{r.weekday}</td><td className="p-2">{r.type}</td><td className="p-2">{r.name}</td><td className="p-2">{r.place}</td><td className="p-2">{r.time}</td><td className="p-2">{r.org}</td><td className="p-2">{r.noticeParts.map((p, pi) => <div key={pi}>{p}</div>)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -2598,7 +2611,7 @@ ${rowsHtml}
               <tbody>
                 {buildScheduleRows(exportScopedEvents).map((r, i) => (
                   <tr key={i} className="border-b border-gray-300">
-                    <td className="p-2">{r.date}</td><td className="p-2">{r.weekday}</td><td className="p-2">{r.type}</td><td className="p-2">{r.name}</td><td className="p-2">{r.place}</td><td className="p-2">{r.time}</td><td className="p-2">{r.org}</td><td className="p-2">{r.notice}</td>
+                    <td className="p-2">{r.date}</td><td className="p-2">{r.weekday}</td><td className="p-2">{r.type}</td><td className="p-2">{r.name}</td><td className="p-2">{r.place}</td><td className="p-2">{r.time}</td><td className="p-2">{r.org}</td><td className="p-2">{r.noticeParts.map((p, pi) => <div key={pi}>{p}</div>)}</td>
                   </tr>
                 ))}
               </tbody>
